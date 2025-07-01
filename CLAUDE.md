@@ -14,9 +14,8 @@ This is an MCP (Model Context Protocol) server that provides access to iRacing t
 ## Tools Available
 1. **`list_cars`** - Find available cars with modern prioritization
 2. **`list_tracks`** - Find available tracks with all variants
-3. **`get_user_fastest_lap`** - Your personal fastest lap for a car/track
-4. **`get_overall_fastest_lap`** - Overall fastest lap from accessible data
-5. **`get_fastest_lap_telemetry`** - Basic telemetry analysis
+3. **`get_my_fastest_lap`** - Your personal fastest lap with telemetry data
+4. **`get_world_fastest_lap`** - World record lap with telemetry data
 
 ## Setup
 1. Get a Garage61 API token from https://garage61.net
@@ -35,10 +34,10 @@ This is an MCP (Model Context Protocol) server that provides access to iRacing t
 - Telemetry requires Pro plan but lap times work with free accounts
 
 ## Development
-- **API Client**: `src/garage61_mcp/api_client.py` - Handles Garage61 API integration
-- **Cache System**: `src/garage61_mcp/cache.py` - Smart fuzzy matching and prioritization
-- **Tools**: `src/garage61_mcp/tools.py` - MCP tool implementations
-- **Server**: `src/garage61_mcp/server.py` - MCP server setup
+- **API Client**: `src/api_client.py` - Handles Garage61 API integration
+- **Cache System**: `src/cache.py` - Smart fuzzy matching and prioritization
+- **Tools**: `src/tools.py` - MCP tool implementations
+- **Server**: `src/server.py` - MCP server setup
 
 ## Testing Commands
 ```bash

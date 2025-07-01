@@ -38,10 +38,10 @@ Repository = "https://github.com/yourusername/garage61-mcp"
 Issues = "https://github.com/yourusername/garage61-mcp/issues"
 
 [project.scripts]
-garage61-mcp = "garage61_mcp.__main__:main"
-
-[tool.setuptools.packages.find]
-where = ["src"]
+garage61-mcp = "__main__:main"
 
 [tool.setuptools.package-dir]
 "" = "src"
+
+[tool.setuptools.py-modules]
+py-modules = ["__init__", "__main__", "server", "api_client", "cache", "tools"]
