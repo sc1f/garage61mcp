@@ -30,9 +30,10 @@ This will:
 
 **Test your installation:**
 ```bash
-# Test with MCP Inspector
+# Test with MCP Inspector (from src directory)
 export GARAGE61_TOKEN=your-token
-npx @modelcontextprotocol/inspector python3 src/__main__.py
+cd src
+npx @modelcontextprotocol/inspector python3 __main__.py
 ```
 
 ### Option 2: Manual Setup
@@ -57,8 +58,22 @@ npx @modelcontextprotocol/inspector python3 src/__main__.py
      "mcpServers": {
        "garage61": {
          "command": "python3",
-         "args": ["-m", "__main__"],
+         "args": ["__main__.py"],
          "cwd": "/absolute/path/to/garage61_mcp/src",
+         "env": {
+           "GARAGE61_TOKEN": "your-garage61-token-here"
+         }
+       }
+     }
+   }
+   ```
+
+   **Alternative (after pip install):**
+   ```json
+   {
+     "mcpServers": {
+       "garage61": {
+         "command": "garage61-mcp",
          "env": {
            "GARAGE61_TOKEN": "your-garage61-token-here"
          }
@@ -141,8 +156,10 @@ Get the world record lap from accessible data.
 
 **"spawn python ENOENT"**
 - Python not found in PATH
-- Try using full path: `/usr/bin/python3` or `/opt/homebrew/bin/python3`
-- Run `which python3` to find your Python path
+- Find your Python path: `which python3`
+- Use full path in Claude config: `/usr/bin/python3`
+- Make sure `cwd` points to your `src/` directory
+- Use `args: ["__main__.py"]` not `args: ["-m", "__main__"]`
 
 **"GARAGE61_TOKEN environment variable is required"**
 - Token not set in Claude config
@@ -173,8 +190,16 @@ cd /path/to/garage61_mcp
 # Set your API token
 export GARAGE61_TOKEN=your-garage61-token-here
 
-# Launch MCP Inspector with the server
+# Option A: Run from src directory (recommended)
+cd src
+npx @modelcontextprotocol/inspector python3 __main__.py
+
+# Option B: Use direct path from root
 npx @modelcontextprotocol/inspector python3 src/__main__.py
+
+# Option C: After pip install -e .
+pip install -e .
+npx @modelcontextprotocol/inspector garage61-mcp
 ```
 
 This will:
@@ -260,7 +285,8 @@ garage61_mcp/
 2. **Test with MCP Inspector:**
    ```bash
    export GARAGE61_TOKEN=your-token
-   npx @modelcontextprotocol/inspector python3 src/__main__.py
+   cd src
+   npx @modelcontextprotocol/inspector python3 __main__.py
    ```
 
 3. **Test individual components:**
