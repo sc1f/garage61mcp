@@ -16,11 +16,19 @@ from formatting import (
     format_conditions,
     format_gap,
     format_lap_time,
+    garage61_link_line,
     kmh,
     lap_summary,
 )
 from lapquality import split_usable
-from telemetry import compare_laps, downsample, parse_lap_csv
+from telemetry import (
+    Corner,
+    build_corner_map,
+    compare_laps,
+    detect_brake_events,
+    downsample,
+    parse_lap_csv,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,9 +36,58 @@ logger = logging.getLogger(__name__)
 # without re-fetching and re-parsing several megabytes of telemetry.
 _comparison_cache: Dict[str, Any] = {}
 
+# One canonical corner map per car/track, so Turn N names the same corner in
+# every comparison regardless of who the reference driver is.
+_corner_map_cache: Dict[str, List[Corner]] = {}
+
+# How many laps to sample when building a corner map. Four is enough for a
+# stable consensus -- dropping from six changed neither the corner count nor
+# apex positions by more than 0.4pp -- and since the two laps being compared are
+# already loaded it costs only two extra telemetry downloads.
+CORNER_MAP_SAMPLE = 4
+
 
 def _cache_key(car: str, track: str) -> str:
     return f"{car.strip().lower()}::{track.strip().lower()}"
+
+
+async def _get_corner_map(
+    client, car: str, track: str, already_loaded: Sequence[Any] = ()
+) -> List[Corner]:
+    """Fetch (and cache) the canonical corner map for a car/track.
+
+    Built from several drivers' laps rather than one, because a single lap's
+    corner count depends on that driver's line -- at Tsukuba the same car gives
+    11 to 13 corners across nine drivers.
+    """
+    key = _cache_key(car, track)
+    if key in _corner_map_cache:
+        return _corner_map_cache[key]
+
+    samples = list(already_loaded)
+    try:
+        result = await client.get_accessible_laps(car, track, group="driver")
+        candidates = [lap for lap in result["laps"] if lap.canViewTelemetry]
+        for lap in candidates[:CORNER_MAP_SAMPLE]:
+            if len(samples) >= CORNER_MAP_SAMPLE:
+                break
+            csv_data = await client.get_lap_telemetry_csv(lap.id)
+            if csv_data:
+                samples.append(parse_lap_csv(csv_data, lap.lapTime, "map"))
+    except Exception as e:
+        # A corner map is an enhancement, not a precondition; fall back to
+        # whatever laps the caller already had rather than failing the tool.
+        logger.warning(f"Could not sample laps for corner map: {e}")
+
+    if not samples:
+        return []
+
+    corner_map = build_corner_map(samples)
+    _corner_map_cache[key] = corner_map
+    logger.info(
+        f"Corner map for {key}: {len(corner_map)} corners from {len(samples)} laps"
+    )
+    return corner_map
 
 
 def _err(message: str) -> list[TextContent]:
@@ -194,6 +251,8 @@ async def list_my_laps(car: str, track: str, clean_only: bool = False) -> list[T
                 "two laps, or `analyze_consistency` to see the pattern across all "
                 "of them."
             )
+            lines.append("")
+            lines.append(garage61_link_line(result))
 
         return _ok("\n".join(lines))
 
@@ -238,8 +297,14 @@ async def compare_my_laps(
         ref_telemetry = await _load_telemetry(client, ref_lap, ref_label)
         cmp_telemetry = await _load_telemetry(client, cmp_lap, cmp_label)
 
+        corner_map = await _get_corner_map(
+            client, car, track, [ref_telemetry, cmp_telemetry]
+        )
         comparison = compare_laps(
-            ref_telemetry, cmp_telemetry, sector_times=ref_lap.sector_times
+            ref_telemetry,
+            cmp_telemetry,
+            sector_times=ref_lap.sector_times,
+            corner_map=corner_map,
         )
 
         _comparison_cache[_cache_key(car, track)] = {
@@ -284,8 +349,10 @@ async def compare_my_laps(
             notes=notes,
         )
         report += (
-            "\n\n_Drill into any part of the lap with `analyze_telemetry_range` "
-            "(for example 45 to 60 percent), or `analyze_worst_sections`._"
+            "\n\n_Drill into any part of the lap with `get_channel_window` "
+            "(pass corner_number for a corner and its braking approach), or "
+            "`analyze_worst_sections`._"
+            f"\n\n{garage61_link_line(result)}"
         )
         return _ok(report)
 
@@ -543,6 +610,8 @@ async def list_drivers(car: str, track: str) -> list[TextContent]:
             "_Garage61 has no global lap search: this is everyone across your "
             "teams, which is the widest pool the API exposes._"
         )
+        lines.append("")
+        lines.append(garage61_link_line(result))
 
         return _ok("\n".join(lines))
 
@@ -610,8 +679,14 @@ async def compare_to_driver(car: str, track: str, driver: str) -> list[TextConte
         their_telemetry = await _load_telemetry(client, their_lap, their_name)
         my_telemetry = await _load_telemetry(client, my_lap, "You")
 
+        corner_map = await _get_corner_map(
+            client, car, track, [their_telemetry, my_telemetry]
+        )
         comparison = compare_laps(
-            their_telemetry, my_telemetry, sector_times=my_lap.sector_times
+            their_telemetry,
+            my_telemetry,
+            sector_times=my_lap.sector_times,
+            corner_map=corner_map,
         )
 
         _comparison_cache[_cache_key(car, track)] = {
@@ -667,6 +742,7 @@ async def compare_to_driver(car: str, track: str, driver: str) -> list[TextConte
         report += (
             "\n\n_Drill in with `analyze_worst_sections`, or `get_channel_window` "
             "for the raw traces._"
+            f"\n\n{garage61_link_line(result)}"
         )
         return _ok(report)
 
@@ -853,8 +929,14 @@ async def compare_my_telemetry_to_team(car: str, track: str) -> list[TextContent
         team_telemetry = parse_lap_csv(team_csv, team_lap["lap_time"], team_label)
         my_telemetry = await _load_telemetry(client, my_lap, my_label)
 
+        corner_map = await _get_corner_map(
+            client, car, track, [team_telemetry, my_telemetry]
+        )
         comparison = compare_laps(
-            team_telemetry, my_telemetry, sector_times=my_lap.sector_times
+            team_telemetry,
+            my_telemetry,
+            sector_times=my_lap.sector_times,
+            corner_map=corner_map,
         )
 
         _comparison_cache[_cache_key(car, track)] = {
@@ -873,8 +955,9 @@ async def compare_my_telemetry_to_team(car: str, track: str) -> list[TextContent
             lap_name=my_label,
         )
         report += (
-            "\n\n_Drill in with `analyze_telemetry_range` or "
+            "\n\n_Drill in with `get_channel_window` or "
             "`analyze_worst_sections`._"
+            f"\n\n{garage61_link_line(my_result)}"
         )
         return _ok(report)
 
@@ -1030,10 +1113,11 @@ CHANNEL_RENDER = {
 async def get_channel_window(
     car: str,
     track: str,
-    start_pct: float,
-    end_pct: float,
+    start_pct: float = 0.0,
+    end_pct: float = 100.0,
     channels: Optional[Sequence[str]] = None,
     points: int = 40,
+    corner_number: Optional[int] = None,
 ) -> list[TextContent]:
     """Return aligned numeric telemetry for a range of the loaded comparison.
 
@@ -1050,6 +1134,25 @@ async def get_channel_window(
                 "The loaded comparison has no telemetry attached. Re-run "
                 "`compare_my_laps` or `compare_my_telemetry_to_team`."
             )
+
+        # A corner number is the natural way to ask for a braking zone, and
+        # numbering is stable per track, so resolve it to a range that includes
+        # the approach where the braking actually happens.
+        if corner_number is not None:
+            match = next(
+                (c for c in comparison.corners if c.corner.number == corner_number),
+                None,
+            )
+            if match is None:
+                available = ", ".join(
+                    str(c.corner.number) for c in comparison.corners
+                ) or "none"
+                return _err(
+                    f"This track has no Turn {corner_number} in the loaded "
+                    f"comparison. Available turns: {available}."
+                )
+            start_pct = max(0.0, match.corner.start_pct * 100 - 5.0)
+            end_pct = min(100.0, match.corner.end_pct * 100 + 3.0)
 
         if start_pct > end_pct:
             start_pct, end_pct = end_pct, start_pct
@@ -1083,7 +1186,15 @@ async def get_channel_window(
             for i in range(points)
         ] if points > 1 else [start_idx]
 
-        header = ["dist%"]
+        # Elapsed time relative to the window start, for both laps. Braking is a
+        # time-domain phenomenon -- how long the pedal is held, how quickly
+        # pressure is built -- and none of that is legible on a distance axis.
+        lap_clock = lap.elapsed_time()
+        ref_clock = reference.elapsed_time()
+        lap_t0 = lap_clock[start_idx] if lap_clock else 0.0
+        ref_t0 = ref_clock[start_idx] if ref_clock else 0.0
+
+        header = ["dist%", "t lap", "t ref"]
         for name in resolved:
             unit = CHANNEL_RENDER[name][0]
             suffix = f" {unit}" if unit else ""
@@ -1094,6 +1205,8 @@ async def get_channel_window(
         rows = []
         for i in indices:
             row = [f"{grid[i] * 100:.2f}"]
+            row.append(f"{lap_clock[i] - lap_t0:.2f}" if lap_clock else "—")
+            row.append(f"{ref_clock[i] - ref_t0:.2f}" if ref_clock else "—")
             for name in resolved:
                 _, convert, digits = CHANNEL_RENDER[name]
                 lap_values = lap.channel(name)
@@ -1119,9 +1232,46 @@ async def get_channel_window(
         lines.extend("| " + " | ".join(row) + " |" for row in rows)
         lines.append("")
         lines.append(
-            "_`delta s` is time gained (−) or lost (+) since the start of this "
-            "window. Steering is degrees, positive to the right._"
+            "_`t lap` / `t ref` are seconds elapsed since the start of this "
+            "window on each lap — use these to read brake duration, how long "
+            "pressure took to build, and how long it was trailed. `delta s` is "
+            "time gained (−) or lost (+) since the window start. Steering is "
+            "degrees, positive to the right._"
         )
+
+        # A per-event summary of the pedal shape, so the caller doesn't have to
+        # reconstruct it from the sampled rows.
+        brake_lines = []
+        for label, source in ((entry["lap_name"], lap), (entry["reference_name"], reference)):
+            events = [
+                e for e in detect_brake_events(
+                    source, track_length_m=comparison.track_length_m
+                )
+                if e.end_pct >= start and e.start_pct <= end
+            ]
+            for e in events:
+                brake_lines.append(
+                    f"| {label} | {e.start_pct * 100:.2f}% | {e.peak_pct * 100:.2f}% "
+                    f"| {e.end_pct * 100:.2f}% | {e.peak_pressure * 100:.0f}% "
+                    f"| {e.duration_s:.2f}s | {e.time_to_peak_s:.2f}s "
+                    f"| {e.release_s:.2f}s "
+                    f"| {e.entry_speed * MS_TO_KMH:.0f}→{e.exit_speed * MS_TO_KMH:.0f} km/h |"
+                )
+        if brake_lines:
+            lines.append("")
+            lines.append("### Braking applications in this window")
+            lines.append("")
+            lines.append(
+                "| Lap | Apply | Peak | Release | Peak press | Duration "
+                "| To peak | Trail | Speed |"
+            )
+            lines.append("|---|---|---|---|---|---|---|---|---|")
+            lines.extend(brake_lines)
+            lines.append("")
+            lines.append(
+                "_`To peak` is how long pressure took to reach maximum; `Trail` "
+                "is how long it was bled off after the peak._"
+            )
         if unknown:
             lines.append("")
             lines.append(
@@ -1702,18 +1852,29 @@ ANALYZE_CONSISTENCY_TOOL = Tool(
 GET_CHANNEL_WINDOW_TOOL = Tool(
     name="get_channel_window",
     description=(
-        "Return the raw aligned telemetry values for both laps across a distance "
-        "range of the most recent comparison, as a numeric table. Use this when "
-        "the summaries don't settle a question and you want to read the actual "
-        "traces — for example to see whether a slower exit came from an early "
-        "brake release, a lift mid-corner, or a gear choice. Run compare_my_laps "
-        "or compare_my_telemetry_to_team first."
+        "Return the raw aligned telemetry for both laps across part of the most "
+        "recent comparison, as a numeric table with BOTH a distance and an "
+        "elapsed-time axis, plus a summary of every braking application in the "
+        "window. Use this to read brake shape and pedal technique directly: how "
+        "long each lap is on the brakes, how fast pressure is built, how long it "
+        "is trailed off, and whether a slower exit came from an early release, a "
+        "mid-corner lift, or a gear choice. Pass corner_number to frame the "
+        "window on a turn and its braking approach automatically. Run "
+        "compare_my_laps, compare_to_driver or compare_my_telemetry_to_team first."
     ),
     inputSchema={
         "type": "object",
         "properties": {
             "car": {"type": "string", "description": _CAR_DESC},
             "track": {"type": "string", "description": _TRACK_DESC},
+            "corner_number": {
+                "type": "number",
+                "description": (
+                    "Frame the window on this turn number and its braking "
+                    "approach. Takes precedence over start_pct/end_pct. Turn "
+                    "numbers are stable for a given car/track."
+                ),
+            },
             "start_pct": {
                 "type": "number",
                 "description": "Start of the range as a percentage of lap distance (0-100)",
@@ -1736,7 +1897,7 @@ GET_CHANNEL_WINDOW_TOOL = Tool(
                 "description": "How many samples to return (5-120, default 40)",
             },
         },
-        "required": ["car", "track", "start_pct", "end_pct"],
+        "required": ["car", "track"],
     },
 )
 

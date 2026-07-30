@@ -111,6 +111,20 @@ alone miss half of Tsukuba, where a light F4 takes many corners on a lift. Every
 corner has a |LatAccel| peak by definition; brake and throttle only classify
 what kind it is.
 
+**Corner numbering must come from `build_corner_map`, never one lap.** Detecting
+on a single lap makes the count depend on whose lap it is — the same F4 at
+Tsukuba yields 11, 12 or 13 corners across nine drivers, because marginal kinks
+sit at the threshold and some drivers straight-line them. That makes "Turn 11"
+name a different corner in different comparisons, which silently invalidates any
+advice keyed to a turn number. The consensus map keeps an apex only when a
+majority of sampled laps find it, and is cached per car/track. It is verified
+stable under shuffling and subsetting.
+
+**Detected turn numbers are not the circuit's official numbers.** The map finds
+driving-relevant corners (11 at both Spa and Tsukuba), whereas Spa officially has
+19-20 and Tsukuba 12-14. Numbering is internally consistent and stable, which is
+what comparisons need, but don't cross-reference it against a track guide.
+
 **Corner direction comes from GPS, not LatAccel.** The accelerometer's sign
 convention disagrees with reality — it reports Spa's La Source, a right-hand
 hairpin, as a left. `_heading_change` derives direction from Lat/Lon, which is
@@ -163,5 +177,23 @@ Python runs from the repository root. Remove it if present.
   parameter by passing a deliberately bogus value and checking for a 400.
 - `/me` returns the token owner's slug, plan and teams. Use its slug to identify
   the user's own laps; matching on driver name or lap time is fragile.
+
+## Linking into the Garage61 web app
+
+Verified route patterns (read from the Angular route table in `chunk-GPEUW4LY.js`,
+not guessed — the SPA returns 200 for every path, so probing URLs proves nothing):
+
+- `/app/laps/{trackId}/{carId}` — lap browser filtered to a car/track, with an
+  **Analyze** button per lap. This is what `garage61_laps_url` emits.
+- `/app/analysis/laps/{id};v={view}` — the comparison view, but `{id}` is a
+  **saved analysis ULID** created server-side through the UI. It cannot be
+  synthesised from two lap ids, and the public API exposes no endpoint to create
+  one, so there is no deep link to an arbitrary comparison.
+- `/app/analyze/{platform}/{track}/{car}` exists in the route table but redirects
+  away when given numeric ids.
+
+Worth knowing: the web UI's lap browser shows **global** lap data (5,251 laps at
+Tsukuba in the F4 versus the 9 drivers the API returns). The restriction is on
+the API, not the product, so the link is the only route to the global field.
 - Telemetry (`/laps/{id}/csv`) returns 403 without a Pro plan; the client
   degrades to lap times rather than failing

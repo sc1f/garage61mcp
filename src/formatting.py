@@ -17,6 +17,35 @@ from telemetry import (
 )
 
 
+GARAGE61_APP = "https://garage61.net/app"
+
+
+def garage61_laps_url(track_id: Optional[int], car_id: Optional[int]) -> Optional[str]:
+    """Deep link to the Garage61 lap browser for a car/track.
+
+    This is as close as the web app can be linked to from outside it. The
+    comparison view lives at /app/analysis/laps/{id}, but that id is a *saved
+    analysis* created server-side through the UI -- it cannot be synthesised
+    from two lap ids, and the public API exposes no endpoint to create one. The
+    lap browser at least lands the user on the right car/track with an "Analyze"
+    button against every lap.
+    """
+    if track_id is None or car_id is None:
+        return None
+    return f"{GARAGE61_APP}/laps/{track_id}/{car_id}"
+
+
+def garage61_link_line(resolved: dict) -> str:
+    """One-line 'view in Garage61' footer built from a resolve_car_track result."""
+    url = garage61_laps_url(resolved.get("track_id"), resolved.get("car_id"))
+    if not url:
+        return ""
+    return (
+        f"[View these laps in Garage61]({url}) — pick any two and hit **Analyze** "
+        "for the interactive traces."
+    )
+
+
 def format_lap_time(seconds: Optional[float]) -> str:
     """Render seconds as m:ss.mmm, the way lap times are normally read."""
     if seconds is None:

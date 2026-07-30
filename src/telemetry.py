@@ -41,6 +41,26 @@ def _to_float(value: Any, default: float = 0.0) -> float:
 
 
 @dataclass
+class BrakeEvent:
+    """One braking application, described the way a driver would describe it."""
+
+    start_pct: float           # where the pedal first moves
+    peak_pct: float            # where pressure peaks
+    end_pct: float             # where the pedal is fully released
+    peak_pressure: float       # 0..1
+    duration_s: float          # seconds from application to release
+    time_to_peak_s: float      # how fast the pedal was built up
+    release_s: float           # seconds from peak to release (trail braking)
+    entry_speed: float         # m/s at application
+    exit_speed: float          # m/s at release
+    distance_m: Optional[float] = None   # metres covered while braking
+
+    @property
+    def speed_scrubbed(self) -> float:
+        return self.entry_speed - self.exit_speed
+
+
+@dataclass
 class LapTelemetry:
     """One lap resampled onto a uniform 0..1 distance grid."""
 
@@ -49,6 +69,10 @@ class LapTelemetry:
     sample_count: int
     lap_time: Optional[float] = None
     label: str = ""
+    # Elapsed time at each grid point, anchored so the last value is lap_time.
+    # Populated lazily by elapsed_time(); braking is a time-domain phenomenon
+    # and cannot be reasoned about on a distance axis alone.
+    _elapsed: Optional[List[float]] = None
 
     def channel(self, name: str) -> List[float]:
         return self.channels.get(name, [])
@@ -56,6 +80,17 @@ class LapTelemetry:
     @property
     def speed(self) -> List[float]:
         return self.channels.get("speed", [])
+
+    def elapsed_time(self) -> List[float]:
+        if self._elapsed is None:
+            self._elapsed = _elapsed_time_trace(self)
+        return self._elapsed
+
+    def time_at(self, index: int) -> Optional[float]:
+        elapsed = self.elapsed_time()
+        if not elapsed or index >= len(elapsed):
+            return None
+        return elapsed[index]
 
 
 @dataclass
@@ -71,6 +106,10 @@ class Corner:
     kind: str               # "braking" | "lift" | "flat"
     apex_speed: float       # m/s
     label: str = ""
+    # Fraction of laps that agreed this corner exists, when built by consensus.
+    # 1.0 means every lap found it; a low value marks a marginal kink that some
+    # drivers straight-line.
+    support: float = 1.0
 
     @property
     def name(self) -> str:
@@ -120,6 +159,10 @@ class CornerComparison:
     ref_throttle_pickup_pct: Optional[float]
     apex_gear: Optional[int]
     ref_apex_gear: Optional[int]
+    # The braking application feeding this corner, if there is one. Carries the
+    # pedal shape in seconds, which is where trail-braking differences live.
+    brake: Optional[BrakeEvent] = None
+    ref_brake: Optional[BrakeEvent] = None
 
 
 @dataclass
@@ -534,6 +577,154 @@ def detect_corners(
     return corners
 
 
+def detect_brake_events(
+    lap: LapTelemetry,
+    threshold: float = 0.03,
+    min_peak: float = 0.10,
+    track_length_m: Optional[float] = None,
+) -> List[BrakeEvent]:
+    """Find each braking application and describe its shape in the time domain.
+
+    `threshold` is where the pedal counts as moving at all, `min_peak` filters
+    out incidental dabs. Times come from the lap's own elapsed-time trace, so
+    "0.4s to peak pressure" means real seconds rather than lap distance.
+    """
+    brake = lap.channel("brake")
+    speed = lap.speed
+    if not brake or not speed:
+        return []
+
+    elapsed = lap.elapsed_time()
+    events: List[BrakeEvent] = []
+    start: Optional[int] = None
+
+    for i, value in enumerate(brake):
+        if value > threshold and start is None:
+            start = i
+        elif value <= threshold and start is not None:
+            events.append((start, i - 1))
+            start = None
+    if start is not None:
+        events.append((start, len(brake) - 1))
+
+    out: List[BrakeEvent] = []
+    for begin, finish in events:
+        window = brake[begin:finish + 1]
+        if not window or max(window) < min_peak:
+            continue
+        peak_idx = begin + window.index(max(window))
+
+        def at(index: int) -> float:
+            return elapsed[index] if elapsed and index < len(elapsed) else 0.0
+
+        distance_m = None
+        if track_length_m:
+            distance_m = (lap.distance[finish] - lap.distance[begin]) * track_length_m
+
+        out.append(
+            BrakeEvent(
+                start_pct=lap.distance[begin],
+                peak_pct=lap.distance[peak_idx],
+                end_pct=lap.distance[finish],
+                peak_pressure=max(window),
+                duration_s=at(finish) - at(begin),
+                time_to_peak_s=at(peak_idx) - at(begin),
+                release_s=at(finish) - at(peak_idx),
+                entry_speed=speed[begin],
+                exit_speed=speed[finish],
+                distance_m=distance_m,
+            )
+        )
+    return out
+
+
+def build_corner_map(
+    laps: Sequence[LapTelemetry], min_support: float = 0.5, tolerance_pct: float = 0.015
+) -> List[Corner]:
+    """Build ONE canonical corner map for a track from several laps.
+
+    Detecting on a single lap makes the corner count depend on whose lap it is:
+    at Tsukuba the same car yields 11, 12 or 13 corners across nine drivers,
+    because marginal kinks sit right at the detection threshold and some drivers
+    straight-line them. That makes turn numbers unusable across comparisons --
+    "Turn 11" would name a different corner depending on the reference lap.
+
+    Taking the consensus fixes that. An apex is kept when it appears in at least
+    `min_support` of the laps, and its canonical position is the median of the
+    laps that found it, so numbering is stable for a given car/track.
+    """
+    detections = [detect_corners(lap) for lap in laps]
+    detections = [d for d in detections if d]
+    if not detections:
+        return []
+    if len(detections) == 1:
+        return detections[0]
+
+    # Cluster apexes across laps by proximity in lap distance.
+    flat = sorted(
+        ((corner.apex_pct, index, corner)
+         for index, found in enumerate(detections) for corner in found),
+        key=lambda item: item[0],
+    )
+
+    clusters: List[List[Tuple[float, int, Corner]]] = []
+    for entry in flat:
+        if clusters and entry[0] - clusters[-1][-1][0] <= tolerance_pct:
+            clusters[-1].append(entry)
+        else:
+            clusters.append([entry])
+
+    required = max(2, int(round(min_support * len(detections))))
+    canonical: List[Corner] = []
+    for cluster in clusters:
+        supporters = {index for _, index, _ in cluster}
+        if len(supporters) < required:
+            continue
+
+        # One vote per lap; a lap that split a complex into two shouldn't
+        # count twice toward its own consensus.
+        per_lap: Dict[int, Corner] = {}
+        for apex, index, corner in cluster:
+            per_lap.setdefault(index, corner)
+        members = list(per_lap.values())
+
+        apexes = sorted(c.apex_pct for c in members)
+        median_apex = apexes[len(apexes) // 2]
+        representative = min(members, key=lambda c: abs(c.apex_pct - median_apex))
+
+        turn_angles = sorted(c.turn_angle for c in members)
+        median_angle = turn_angles[len(turn_angles) // 2]
+        speeds = sorted(c.apex_speed for c in members)
+        median_speed = speeds[len(speeds) // 2]
+
+        kinds = [c.kind for c in members]
+        kind = max(set(kinds), key=kinds.count)
+
+        canonical.append(
+            Corner(
+                number=0,  # assigned below, in track order
+                apex_pct=median_apex,
+                start_pct=min(c.start_pct for c in members),
+                end_pct=max(c.end_pct for c in members),
+                direction="right" if median_angle > 0 else "left",
+                turn_angle=median_angle,
+                kind=kind,
+                apex_speed=median_speed,
+                label="",
+                support=len(supporters) / len(detections),
+            )
+        )
+
+    canonical.sort(key=lambda c: c.apex_pct)
+    for number, corner in enumerate(canonical, start=1):
+        corner.number = number
+        corner.label = (
+            f"Turn {number} "
+            f"({_classify_corner(corner.turn_angle, corner.apex_speed, corner.kind)})"
+        )
+    return canonical
+
+
 # --------------------------------------------------------------------------
 # Segmentation
 # --------------------------------------------------------------------------
@@ -652,15 +843,32 @@ def _first_crossing(
     return None
 
 
+def _brake_for_corner(
+    events: Sequence[BrakeEvent], corner: Corner
+) -> Optional[BrakeEvent]:
+    """The braking application feeding a corner: the last one ending by the apex."""
+    candidates = [
+        e for e in events
+        if e.start_pct <= corner.apex_pct and e.end_pct >= corner.start_pct - 0.05
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda e: e.start_pct)
+
+
 def compare_corners(
     reference: LapTelemetry,
     lap: LapTelemetry,
     corners: Sequence[Corner],
     trace: Sequence[float],
+    track_length_m: Optional[float] = None,
 ) -> List[CornerComparison]:
     """Measure both laps through each detected corner."""
     results: List[CornerComparison] = []
     last = len(lap.distance) - 1
+
+    lap_brakes = detect_brake_events(lap, track_length_m=track_length_m)
+    ref_brakes = detect_brake_events(reference, track_length_m=track_length_m)
 
     for corner in corners:
         start_idx = _index_for(lap.distance, corner.start_pct)
@@ -721,6 +929,8 @@ def compare_corners(
                 ),
                 apex_gear=int(round(apex_gear)) if apex_gear is not None else None,
                 ref_apex_gear=int(round(ref_apex_gear)) if ref_apex_gear is not None else None,
+                brake=_brake_for_corner(lap_brakes, corner),
+                ref_brake=_brake_for_corner(ref_brakes, corner),
             )
         )
 
@@ -732,17 +942,23 @@ def compare_laps(
     lap: LapTelemetry,
     sector_times: Optional[Sequence[float]] = None,
     segment_count: int = 12,
+    corner_map: Optional[Sequence[Corner]] = None,
 ) -> Comparison:
-    """Compare `lap` against `reference`, attributing the gap across the lap."""
+    """Compare `lap` against `reference`, attributing the gap across the lap.
+
+    Pass `corner_map` (from build_corner_map) so turn numbers stay identical
+    across every comparison on this track. Falling back to detecting on the
+    reference lap makes numbering depend on who the reference is.
+    """
     track_length = estimate_track_length(reference) or estimate_track_length(lap)
     trace = delta_time_trace(reference, lap)
 
     bounds = build_segment_bounds(sector_times, reference.lap_time, segment_count)
     segments = build_segments(reference, lap, trace, bounds)
 
-    # Corners come from the reference lap: it is the benchmark, so its line
-    # defines where the corners are for both.
-    corners = compare_corners(reference, lap, detect_corners(reference), trace)
+    corners = compare_corners(
+        reference, lap, corner_map or detect_corners(reference), trace, track_length
+    )
 
     stated = None
     if reference.lap_time is not None and lap.lap_time is not None:

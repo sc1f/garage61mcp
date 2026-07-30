@@ -89,6 +89,7 @@ async def _dispatch(name: str, arguments: dict) -> list[TextContent]:
         return await analyze_consistency(car, track)
 
     if name == "get_channel_window":
+        corner_number = arguments.get("corner_number")
         return await get_channel_window(
             car,
             track,
@@ -96,6 +97,7 @@ async def _dispatch(name: str, arguments: dict) -> list[TextContent]:
             arguments.get("end_pct", 100),
             arguments.get("channels"),
             int(arguments.get("points", 40)),
+            int(corner_number) if corner_number is not None else None,
         )
 
     if name == "get_my_fastest_lap":
