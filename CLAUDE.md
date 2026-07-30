@@ -1,64 +1,151 @@
 # Garage61 MCP Server
 
 ## Overview
-This is an MCP (Model Context Protocol) server that provides access to iRacing telemetry data through the Garage61 API. It allows Claude and other AI assistants to fetch lap times, telemetry data, and racing statistics for cars and tracks in iRacing.
+An MCP (Model Context Protocol) server that exposes iRacing telemetry from the
+Garage61 API. It lets Claude fetch lap times and telemetry, and — the main point
+— compare laps against each other with a real delta-time calculation.
 
-## Features
-- **Smart Car/Track Discovery**: Use `list_cars` and `list_tracks` to find available vehicles and circuits
-- **Fuzzy Name Matching**: Don't need exact names - the system will suggest close matches
-- **Modern Car Prioritization**: Automatically prioritizes current generation cars (e.g., 992 over 991 Porsche)
-- **Track Variant Support**: Handles multiple track configurations with intelligent preference scoring
-- **Telemetry Access**: Get lap times and telemetry data (Pro plan features gracefully degrade)
-- **Multiple Data Sources**: Access your personal laps, team laps, or overall fastest laps
+## Tools
 
-## Tools Available
-1. **`list_cars`** - Find available cars with modern prioritization
-2. **`list_tracks`** - Find available tracks with all variants
-3. **`get_my_fastest_lap`** - Your personal fastest lap with telemetry data
-4. **`get_world_fastest_lap`** - World record lap with telemetry data
+**Discovery** (call these first to get exact names)
+1. **`list_cars`** — available cars, modern generations prioritised
+2. **`list_tracks`** — available tracks with all variants
+
+**Your own laps**
+3. **`list_my_laps`** — every lap you've set on a car/track, with dates, sector
+   splits, conditions, and compromised laps flagged
+4. **`compare_my_laps`** — compare two of your *own* laps corner by corner. This
+   is the tool for tracking progress over time.
+5. **`analyze_consistency`** — all laps at once: spread, per-sector variability,
+   theoretical best, session-to-session trend
+6. **`get_my_fastest_lap`** — summary of your personal best
+
+**Team comparison**
+7. **`get_team_fastest_lap`** — fastest accessible team lap and your gap to it
+8. **`compare_my_telemetry_to_team`** — your best vs the team's best
+
+**Drill-down** (require a comparison to have been run first)
+9. **`analyze_worst_sections`** — corners ranked by time lost
+10. **`analyze_telemetry_sector`** / **`analyze_telemetry_range`** — summary of
+    one sector or an arbitrary distance range
+11. **`get_channel_window`** — raw aligned channel values for both laps across a
+    range, as numbers
+
+## Division of labour: server computes, caller reasons
+
+The server does what is numerically hard and deterministic — alignment,
+resampling, delta-time integration, corner detection, unit conversion. The
+caller does what is semantically hard — deciding *why* a corner was slower and
+what to change.
+
+This split is deliberate and was arrived at the hard way. An earlier version
+generated its own explanations from if/else heuristics and produced output like
+"lost 0.449s — minimum speed 5.5 km/h **higher**", which is not an explanation at
+all. Emitting facts and letting the caller reason produced better results
+immediately. **Do not reintroduce heuristic cause-finding into the server.** If
+the caller needs more evidence, the answer is `get_channel_window`, which hands
+back real numbers for any stretch of the lap.
 
 ## Setup
 1. Get a Garage61 API token from https://garage61.net
-2. Create a `.env` file:
-   ```
-   GARAGE61_TOKEN=your-token-here
-   ```
-3. Install dependencies: `pip install -r requirements.txt`
-4. Run: `python -m garage61_mcp`
+2. Create a `.env` file with `GARAGE61_TOKEN=your-token-here`, or set the
+   variable in the MCP server config
+3. `pip install -r requirements.txt`
+4. Run `python3 src/__main__.py` (or `python -m garage61_mcp` after
+   `pip install -e .`)
 
-## Usage Tips
-- Always use `list_cars` and `list_tracks` first to get exact names
-- Track names include variants: "Lime Rock Park - Grand Prix"
-- Car suggestions prioritize modern versions automatically
-- Error messages will guide you if names don't match
-- Telemetry requires Pro plan but lap times work with free accounts
+Set `GARAGE61_LOG_LEVEL=DEBUG` when troubleshooting; it defaults to `WARNING`
+because debug logs include full telemetry payloads.
 
-## Development
-- **API Client**: `src/api_client.py` - Handles Garage61 API integration
-- **Cache System**: `src/cache.py` - Smart fuzzy matching and prioritization
-- **Tools**: `src/tools.py` - MCP tool implementations
-- **Server**: `src/server.py` - MCP server setup
+## Architecture
+- **`src/api_client.py`** — Garage61 REST client and response models
+- **`src/cache.py`** — car/track fuzzy matching and variant prioritisation
+- **`src/telemetry.py`** — CSV parsing, resampling, delta-time, corner detection
+- **`src/lapquality.py`** — deciding which laps are worth comparing
+- **`src/formatting.py`** — turns analysis results into readable Markdown
+- **`src/tools.py`** — MCP tool implementations and schemas
+- **`src/server.py`** — MCP server setup and tool dispatch
 
-## Testing Commands
-```bash
-# Test with specific commands
-python -m garage61_mcp
+## Things worth knowing before changing this code
 
-# Run linting (if available)
-npm run lint
+**Telemetry CSV column order is not what it looks like.** `Speed` is column 0
+and `LapDistPct` is column 1. Index into the CSV by *header name*, never by
+position — an earlier version bucketed laps into sectors using column 0 and put
+every sample in the last sector, because speed is always greater than 0.75.
 
-# Run type checking (if available)  
-npm run typecheck
-```
+**Units from the API are SI, not display units.** Speed is m/s (not km/h) and
+`SteeringWheelAngle` is radians (not degrees). Convert only at the presentation
+boundary; `telemetry.py` deliberately keeps everything in SI.
 
-## Error Handling
-The system provides clear error messages:
-- **Car/Track not found**: Suggests similar names and directs to list tools
-- **No lap data**: Explains this means you haven't driven that combination yet
-- **Pro plan required**: Gracefully degrades while still showing lap times
+**`LapDistPct` is not monotonic.** Samples are time-ordered, so distance dips
+around the start/finish line. `parse_lap_csv` sorts by distance and merges
+duplicates before interpolating — don't assume ordering.
+
+**Never return raw telemetry CSV from a tool.** A lap is roughly 8,000 rows /
+1.3 MB, which blows past any model's context. Every tool summarises. Keep single
+tool results in the low thousands of characters.
+
+**Track length is derived, not looked up.** `estimate_track_length` inverts
+`lap_time = L * integral(dd/v)` to recover L from the speed trace. It lands
+within about 1% (6936 m computed vs 7004 m actual at Spa) and self-calibrates
+against whatever units the API returns. Delta-time is then a real integral, and
+its endpoint is checked against the known lap-time gap — that discrepancy is
+reported in the output rather than hidden.
+
+**Sector boundaries come from the API.** Lap records carry real `sectors` times.
+`build_segment_bounds` proportions them by cumulative time; it only falls back to
+equal-sized chunks when sector data is missing.
+
+**Delta-time normalises each lap to its own recorded time.** Do not "simplify"
+this back to a single shared track length. The speed channel carries a per-lap
+calibration bias — two F4 laps at Tsukuba imply track lengths 1.5% apart — and
+using one lap's scale for both turns that bias into phantom time delta. It read
++1.094s on a real +0.265s gap. Normalising each lap by its own integral cancels
+the bias and makes the endpoint exact by construction.
+
+**Corners are detected from lateral acceleration, not braking.** Brake events
+alone miss half of Tsukuba, where a light F4 takes many corners on a lift. Every
+corner has a |LatAccel| peak by definition; brake and throttle only classify
+what kind it is.
+
+**Corner direction comes from GPS, not LatAccel.** The accelerometer's sign
+convention disagrees with reality — it reports Spa's La Source, a right-hand
+hairpin, as a left. `_heading_change` derives direction from Lat/Lon, which is
+unambiguous and cross-checks correctly against the real circuit.
+
+**Corner extents must stay bounded.** The extent walk stops at the midpoint to
+each neighbouring apex and at an absolute width cap. Without those, a continuous
+complex never drops below the edge threshold, one "corner" swallows two-thirds
+of the lap, and the GPS heading measured across it becomes meaningless.
+
+**Read corner values at the apex, not as a window extreme.** `min()` over a
+corner window is wrong twice over: the gear channel dips to 0 during downshift
+blips, and where a corner flows into the next braking zone the slowest point
+sits at the window edge rather than the apex.
+
+**Compromised laps are excluded, never silently.** `lapquality.split_usable`
+flags outlaps, offs and spins by comparing each sector against the field median
+(4 of 10 Tsukuba laps had a sector 1.5-1.8x normal). Excluded laps are always
+reported with the reason, and the filter backs off entirely rather than leave
+fewer than two laps to compare.
+
+**`mcp` must stay below 2.0.** Version 2.x removed the low-level
+`@server.list_tools()` / `@server.call_tool()` decorator API that `server.py` is
+built on. An unpinned install picks up 2.0 and crashes on startup with
+`AttributeError: 'Server' object has no attribute 'list_tools'`. Migrating to the
+2.x `MCPServer` API is a separate piece of work.
+
+## Repository layout note
+The sources live in `src/`, which installs as the `garage61_mcp` package via
+`package-dir` in `pyproject.toml`. An older duplicate copy of the code may still
+exist at `garage61_mcp/`; it is stale and shadows the installed package when
+Python runs from the repository root. Remove it if present.
 
 ## API Integration
 - Base URL: `https://garage61.net/api/v1`
 - Authentication: Bearer token
-- Rate limiting: Handled by API
-- Caching: Smart local cache for cars/tracks data
+- Lap queries require both `cars` and `tracks` parameters; there is no
+  unfiltered "all my laps" query
+- `group=none` returns every lap, `group=driver` collapses to personal bests
+- Telemetry (`/laps/{id}/csv`) returns 403 without a Pro plan; the client
+  degrades to lap times rather than failing
