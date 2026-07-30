@@ -20,15 +20,18 @@ Garage61 API. It lets Claude fetch lap times and telemetry, and — the main poi
    theoretical best, session-to-session trend
 6. **`get_my_fastest_lap`** — summary of your personal best
 
-**Team comparison**
-7. **`get_team_fastest_lap`** — fastest accessible team lap and your gap to it
-8. **`compare_my_telemetry_to_team`** — your best vs the team's best
+**Other drivers**
+7. **`list_drivers`** — leaderboard of everyone whose laps you can see on a
+   car/track, with your gap and rank
+8. **`compare_to_driver`** — corner-by-corner against one named driver
+9. **`get_team_fastest_lap`** — fastest accessible lap and your gap to it
+10. **`compare_my_telemetry_to_team`** — your best vs the fastest accessible lap
 
 **Drill-down** (require a comparison to have been run first)
-9. **`analyze_worst_sections`** — corners ranked by time lost
-10. **`analyze_telemetry_sector`** / **`analyze_telemetry_range`** — summary of
+11. **`analyze_worst_sections`** — corners ranked by time lost
+12. **`analyze_telemetry_sector`** / **`analyze_telemetry_range`** — summary of
     one sector or an arbitrary distance range
-11. **`get_channel_window`** — raw aligned channel values for both laps across a
+13. **`get_channel_window`** — raw aligned channel values for both laps across a
     range, as numbers
 
 ## Division of labour: server computes, caller reasons
@@ -147,5 +150,18 @@ Python runs from the repository root. Remove it if present.
 - Lap queries require both `cars` and `tracks` parameters; there is no
   unfiltered "all my laps" query
 - `group=none` returns every lap, `group=driver` collapses to personal bests
+- **There is no global lap search, by design.** The API documents that laps
+  outside your own teams are private. Omitting `drivers` returns you plus
+  everyone across all your teams, which is the widest pool available — at Spa in
+  the 992 that is 30 drivers, not one teammate. Don't collapse that to a single
+  "team best"; `list_drivers` exposes the whole field.
+- **`drivers` only accepts the literal `"me"`.** Slugs and driver IDs both
+  return 400, so narrowing to one specific teammate has to be done client-side
+  after fetching the accessible set.
+- Unknown query parameters are silently ignored rather than rejected, so a
+  200 response is not evidence that a parameter did anything. Validate a guessed
+  parameter by passing a deliberately bogus value and checking for a 400.
+- `/me` returns the token owner's slug, plan and teams. Use its slug to identify
+  the user's own laps; matching on driver name or lap time is fragile.
 - Telemetry (`/laps/{id}/csv`) returns 403 without a Pro plan; the client
   degrades to lap times rather than failing

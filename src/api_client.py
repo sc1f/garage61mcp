@@ -103,6 +103,7 @@ class Garage61Client:
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json"
         }
+        self._me: Optional[Dict[str, Any]] = None
     
     async def get_cars(self) -> List[Dict[str, Any]]:
         """Fetch available cars."""
@@ -226,6 +227,71 @@ class Garage61Client:
             "track_id": track_id,
             "track_resolved": track_resolved,
         }
+
+    async def get_me(self) -> Dict[str, Any]:
+        """Fetch the token owner's identity, including their teams.
+
+        Cached for the process lifetime; it never changes mid-session, and it is
+        the reliable way to recognise the user's own laps. Matching on driver
+        name or lap time instead breaks against a teammate who shares a name or
+        happens to have set an identical time.
+        """
+        if self._me is not None:
+            return self._me
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            try:
+                response = await client.get(f"{self.base_url}/me", headers=self.headers)
+                response.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 401:
+                    raise ValueError("Invalid authentication token")
+                raise ValueError(f"API error fetching profile: {e.response.status_code}")
+            except httpx.RequestError as e:
+                raise ValueError(f"Network error: {str(e)}")
+
+        self._me = response.json()
+        return self._me
+
+    async def get_accessible_laps(
+        self, car_name: str, track_name: str, limit: int = 1000, group: str = "none"
+    ) -> Dict[str, Any]:
+        """Fetch every lap the token can see for a car/track, from all drivers.
+
+        With no `drivers` parameter the API returns the user plus everyone on
+        their teams. There is deliberately no global search -- the API documents
+        that laps outside your teams are private -- so this is the widest pool
+        available.
+        """
+        resolved = self.resolve_car_track(car_name, track_name)
+
+        params = {
+            "cars": [resolved["car_id"]],
+            "tracks": [resolved["track_id"]],
+            # No `drivers`: that parameter only accepts the literal "me", so
+            # narrowing to one teammate has to happen client-side.
+            "limit": limit,
+            "group": group,   # "driver" collapses to one personal best each
+            "lapTypes": [1],
+        }
+
+        async with httpx.AsyncClient(timeout=90) as client:
+            try:
+                response = await client.get(
+                    f"{self.base_url}/laps", headers=self.headers, params=params
+                )
+                response.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 401:
+                    raise ValueError("Invalid authentication token")
+                raise ValueError(f"API error: {e.response.status_code} - {e.response.text}")
+            except httpx.RequestError as e:
+                raise ValueError(f"Network error: {str(e)}")
+
+            laps = [LapData(**lap) for lap in response.json().get("items", [])]
+
+        resolved["laps"] = sorted(laps, key=lambda lap: lap.lapTime)
+        return resolved
 
     async def get_my_laps(
         self, car_name: str, track_name: str, limit: int = 200, clean_only: bool = False
