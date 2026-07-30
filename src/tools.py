@@ -421,6 +421,263 @@ async def analyze_consistency(car: str, track: str) -> list[TextContent]:
 
 
 # --------------------------------------------------------------------------
+# Other drivers
+# --------------------------------------------------------------------------
+
+def _driver_name(lap: LapData) -> str:
+    return lap.driver.name if lap.driver else "Unknown"
+
+
+def _driver_slug(lap: LapData) -> str:
+    return lap.driver.slug if lap.driver else ""
+
+
+def match_driver(laps: Sequence[LapData], query: str) -> str:
+    """Resolve a free-text driver name to a slug present in the lap set.
+
+    Accepts a slug, a full name, or any distinctive fragment ("adnan",
+    "patterson"). Raises with the candidate list when the query is ambiguous,
+    rather than silently picking one.
+    """
+    wanted = (query or "").strip().lower()
+    if not wanted:
+        raise ValueError("No driver specified.")
+
+    by_slug: Dict[str, str] = {}
+    for lap in laps:
+        slug = _driver_slug(lap)
+        if slug:
+            by_slug[slug] = _driver_name(lap)
+
+    if wanted in by_slug:
+        return wanted
+
+    exact = [slug for slug, name in by_slug.items() if name.lower() == wanted]
+    if len(exact) == 1:
+        return exact[0]
+
+    partial = [
+        slug for slug, name in by_slug.items()
+        if wanted in name.lower() or wanted in slug
+    ]
+    if len(partial) == 1:
+        return partial[0]
+    if len(partial) > 1:
+        names = ", ".join(sorted(by_slug[s] for s in partial))
+        raise ValueError(
+            f"'{query}' matches several drivers: {names}. Be more specific."
+        )
+
+    available = ", ".join(sorted(by_slug.values())[:12])
+    raise ValueError(
+        f"No driver matching '{query}' has laps here. Available: {available}"
+        + (" ..." if len(by_slug) > 12 else "")
+        + ". Use `list_drivers` to see everyone."
+    )
+
+
+async def list_drivers(car: str, track: str) -> list[TextContent]:
+    """Leaderboard of every driver the user can see on a car/track."""
+    try:
+        client = create_client()
+        me = await client.get_me()
+        result = await client.get_accessible_laps(car, track, group="driver")
+        laps: List[LapData] = result["laps"]
+
+        if not laps:
+            return _err(
+                f"No laps visible for **{result['car_resolved']}** at "
+                f"**{result['track_resolved']}** from you or your teams."
+            )
+
+        my_slug = me.get("slug")
+        mine = next((lap for lap in laps if _driver_slug(lap) == my_slug), None)
+
+        lines = [
+            f"## Drivers: {result['car_resolved']} at {result['track_resolved']}",
+            "",
+            f"**{len(laps)} drivers** with laps you can access "
+            f"(you and your {len(me.get('teams', []))} team(s)).",
+            "",
+            "| # | Driver | Best lap | Gap to you | Telemetry | Set |",
+            "|---|---|---|---|---|---|",
+        ]
+
+        for position, lap in enumerate(laps, start=1):
+            is_me = _driver_slug(lap) == my_slug
+            gap = (
+                lap.lapTime - mine.lapTime
+                if mine and not is_me else None
+            )
+            lines.append(
+                f"| {position} "
+                f"| {_driver_name(lap)}{' **(you)**' if is_me else ''} "
+                f"| **{format_lap_time(lap.lapTime)}** "
+                f"| {format_gap(gap) if gap is not None else '—'} "
+                f"| {'yes' if lap.canViewTelemetry else 'no'} "
+                f"| {lap.startTime[:10]} |"
+            )
+
+        lines.append("")
+        if mine:
+            faster = [lap for lap in laps if lap.lapTime < mine.lapTime]
+            lines.append(
+                f"You are **P{laps.index(mine) + 1} of {len(laps)}**"
+                + (
+                    f", {len(faster)} driver(s) ahead. Closest is "
+                    f"**{_driver_name(faster[-1])}** at "
+                    f"{format_gap(faster[-1].lapTime - mine.lapTime)}."
+                    if faster else " — you're quickest here. 🏆"
+                )
+            )
+        else:
+            lines.append("_You have no lap here yet._")
+
+        lines.append("")
+        lines.append(
+            "Use `compare_to_driver` with any name above for a corner-by-corner "
+            "comparison against them."
+        )
+        lines.append("")
+        lines.append(
+            "_Garage61 has no global lap search: this is everyone across your "
+            "teams, which is the widest pool the API exposes._"
+        )
+
+        return _ok("\n".join(lines))
+
+    except ValueError as e:
+        return _err(str(e))
+    except Exception as e:
+        logger.error(f"list_drivers failed: {e}", exc_info=True)
+        return _err(f"Could not list drivers: {e}")
+
+
+async def compare_to_driver(car: str, track: str, driver: str) -> list[TextContent]:
+    """Compare the user's best lap against a specific other driver's best."""
+    try:
+        client = create_client()
+        me = await client.get_me()
+        result = await client.get_accessible_laps(car, track)
+        laps: List[LapData] = result["laps"]
+
+        if not laps:
+            return _err(
+                f"No laps visible for **{result['car_resolved']}** at "
+                f"**{result['track_resolved']}**."
+            )
+
+        my_slug = me.get("slug")
+        target_slug = match_driver(laps, driver)
+
+        if target_slug == my_slug:
+            return _err(
+                "That's you. Use `compare_my_laps` to compare your own laps "
+                "against each other."
+            )
+
+        mine = [lap for lap in laps if _driver_slug(lap) == my_slug]
+        theirs = [lap for lap in laps if _driver_slug(lap) == target_slug]
+
+        if not mine:
+            return _err(
+                f"You have no lap for **{result['car_resolved']}** at "
+                f"**{result['track_resolved']}**, so there is nothing to compare."
+            )
+        if not theirs:
+            return _err(f"No laps found for that driver here.")
+
+        # Their compromised laps matter as much as the user's: comparing against
+        # someone's spin teaches nothing.
+        my_usable, _ = split_usable(mine)
+        their_usable, _ = split_usable(theirs)
+
+        my_lap = min(my_usable, key=lambda lap: lap.lapTime)
+        their_lap = min(their_usable, key=lambda lap: lap.lapTime)
+        their_name = _driver_name(their_lap)
+
+        if not their_lap.canViewTelemetry:
+            gap = my_lap.lapTime - their_lap.lapTime
+            return _ok(
+                f"## You vs {their_name}\n\n"
+                f"**{their_name}**: {format_lap_time(their_lap.lapTime)}  \n"
+                f"**You**: {format_lap_time(my_lap.lapTime)}  \n"
+                f"**Gap**: {format_gap(gap)}\n\n"
+                "_Their telemetry isn't shared, so only lap times can be "
+                "compared. Their privacy settings control this._"
+            )
+
+        their_telemetry = await _load_telemetry(client, their_lap, their_name)
+        my_telemetry = await _load_telemetry(client, my_lap, "You")
+
+        comparison = compare_laps(
+            their_telemetry, my_telemetry, sector_times=my_lap.sector_times
+        )
+
+        _comparison_cache[_cache_key(car, track)] = {
+            "comparison": comparison,
+            "reference_name": their_name,
+            "lap_name": "You",
+        }
+
+        notes = []
+        if my_lap.sector_times and their_lap.sector_times:
+            splits = "  ".join(
+                f"S{i} {mine_t - theirs_t:+.3f}s"
+                for i, (theirs_t, mine_t) in enumerate(
+                    zip(their_lap.sector_times, my_lap.sector_times), start=1
+                )
+            )
+            notes.append(f"**Sector splits**: {splits}")
+
+        conditions = []
+        if my_lap.trackTemp is not None and their_lap.trackTemp is not None:
+            drift = my_lap.trackTemp - their_lap.trackTemp
+            if abs(drift) >= 3.0:
+                conditions.append(
+                    f"track temperature differs by {drift:+.1f}°C "
+                    f"({their_lap.trackTemp:.1f}°C for them, "
+                    f"{my_lap.trackTemp:.1f}°C for you)"
+                )
+        if conditions:
+            notes.append(f"⚠️ **Caveat**: {'; '.join(conditions)}.")
+
+        ranked = sorted(laps, key=lambda lap: lap.lapTime)
+        seen: List[str] = []
+        for lap in ranked:
+            slug = _driver_slug(lap)
+            if slug and slug not in seen:
+                seen.append(slug)
+        if my_slug in seen and target_slug in seen:
+            notes.append(
+                f"_Standings here: {their_name} is P{seen.index(target_slug) + 1}, "
+                f"you are P{seen.index(my_slug) + 1}, of {len(seen)} drivers._"
+            )
+
+        report = comparison_report(
+            comparison,
+            title=(
+                f"{result['car_resolved']} at {result['track_resolved']} — "
+                f"you vs {their_name}"
+            ),
+            reference_name=their_name,
+            lap_name="You",
+            notes=notes,
+        )
+        report += (
+            "\n\n_Drill in with `analyze_worst_sections`, or `get_channel_window` "
+            "for the raw traces._"
+        )
+        return _ok(report)
+
+    except ValueError as e:
+        return _err(str(e))
+    except Exception as e:
+        logger.error(f"compare_to_driver failed: {e}", exc_info=True)
+        return _err(f"Comparison failed: {e}")
+
+
+# --------------------------------------------------------------------------
 # Single-lap views
 # --------------------------------------------------------------------------
 
@@ -1374,6 +1631,54 @@ ANALYZE_WORST_SECTIONS_TOOL = Tool(
     },
 )
 
+LIST_DRIVERS_TOOL = Tool(
+    name="list_drivers",
+    description=(
+        "List every driver whose laps the user can see for a car/track — "
+        "themselves plus everyone across their Garage61 teams — as a leaderboard "
+        "with each driver's best lap, the user's gap to them, and whether their "
+        "telemetry is shared. Use this to answer 'who else has driven this?', "
+        "'where do I rank?', or to find someone to compare against. Note that "
+        "Garage61 has no global lap search, so this is limited to the user's "
+        "teams by design."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "car": {"type": "string", "description": _CAR_DESC},
+            "track": {"type": "string", "description": _TRACK_DESC},
+        },
+        "required": ["car", "track"],
+    },
+)
+
+COMPARE_TO_DRIVER_TOOL = Tool(
+    name="compare_to_driver",
+    description=(
+        "Compare the user's best lap against a SPECIFIC other driver's best, "
+        "corner by corner, with a real delta-time calculation. Use this when the "
+        "user names someone they want to measure themselves against. The driver "
+        "can be given as a full name or a fragment such as a surname. Call "
+        "list_drivers first if you don't know who is available. For the fastest "
+        "driver overall use compare_my_telemetry_to_team instead."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "car": {"type": "string", "description": _CAR_DESC},
+            "track": {"type": "string", "description": _TRACK_DESC},
+            "driver": {
+                "type": "string",
+                "description": (
+                    "Who to compare against: full name, surname, or slug "
+                    "(e.g. 'Alex Patterson', 'patterson', 'alex-patterson')"
+                ),
+            },
+        },
+        "required": ["car", "track", "driver"],
+    },
+)
+
 ANALYZE_CONSISTENCY_TOOL = Tool(
     name="analyze_consistency",
     description=(
@@ -1442,6 +1747,8 @@ ALL_TOOLS = [
     COMPARE_MY_LAPS_TOOL,
     ANALYZE_CONSISTENCY_TOOL,
     MY_FASTEST_LAP_TOOL,
+    LIST_DRIVERS_TOOL,
+    COMPARE_TO_DRIVER_TOOL,
     TEAM_FASTEST_LAP_TOOL,
     COMPARE_TELEMETRY_TOOL,
     ANALYZE_WORST_SECTIONS_TOOL,

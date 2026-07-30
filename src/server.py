@@ -16,10 +16,12 @@ from tools import (
     analyze_worst_sections,
     compare_my_laps,
     compare_my_telemetry_to_team,
+    compare_to_driver,
     get_channel_window,
     get_my_fastest_lap,
     get_team_fastest_lap,
     list_cars,
+    list_drivers,
     list_my_laps,
     list_tracks,
 )
@@ -65,6 +67,23 @@ async def _dispatch(name: str, arguments: dict) -> list[TextContent]:
             arguments.get("reference") or "fastest",
             arguments.get("compared") or "latest",
         )
+
+    if name == "list_drivers":
+        return await list_drivers(car, track)
+
+    if name == "compare_to_driver":
+        target = (arguments.get("driver") or "").strip()
+        if not target:
+            return [
+                TextContent(
+                    type="text",
+                    text=(
+                        "**Error**: 'driver' is required. Use `list_drivers` to "
+                        "see who has laps on this car/track."
+                    ),
+                )
+            ]
+        return await compare_to_driver(car, track, target)
 
     if name == "analyze_consistency":
         return await analyze_consistency(car, track)

@@ -11,7 +11,7 @@ A Model Context Protocol (MCP) server that connects Claude Desktop to Garage61's
 - 🧹 **Ignores compromised laps**: outlaps, spins and offs are detected and excluded from comparisons, with the reason reported
 - 📊 **Consistency analysis**: spread, per-sector variability, and your theoretical best lap across every clean lap
 - 🔬 **Raw data on demand**: pull the actual aligned channel values for any stretch of the lap when a summary isn't enough
-- 🏁 **Team comparison**: measure yourself against your team's fastest lap
+- 🏁 **Compare against other drivers**: a leaderboard of everyone across your teams, your rank in it, and corner-by-corner comparison against any of them by name
 - 🔍 **Smart search**: fuzzy matching for car and track names
 - 🏎️ **Modern cars**: automatically prioritizes current generation vehicles
 - 🌡️ **Condition awareness**: flags when track temperature or fuel load differs enough to make a comparison unfair
@@ -172,10 +172,11 @@ Ask Claude natural language questions about iRacing data:
 - *"What's my fastest lap with the Mazda MX-5 at Lime Rock Park?"*
 - *"Show me my personal best at Nürburgring with the BMW M4 GT3"*
 
-### Team records and comparisons
-- *"What's the team record for Mercedes AMG GT3 at Silverstone?"*
+### Comparing against other drivers
+- *"Who else has driven the 992 GT3 R at Spa, and where do I rank?"*
+- *"Compare me to Alex Patterson at Spa"*
+- *"Who's just ahead of me, and where do they find the time?"*
 - *"Show me where I'm losing time compared to my teammate's fastest lap"*
-- *"Compare my telemetry to the team fastest lap at Spa with the Porsche 992 GT3"*
 
 ### Drilling into a comparison
 - *"Which corners am I losing the most time in?"*
@@ -249,6 +250,33 @@ Get a summary of your personal best lap.
 - Top, minimum, and average speed; full-throttle and braking share
 - A coarse speed trace around the lap
 - The conditions it was set in
+
+### `list_drivers`
+Leaderboard of every driver whose laps you can see on a car/track.
+
+**Parameters:** `car`, `track`
+
+**Returns:** each driver's best lap, your gap to them, whether their telemetry is
+shared, and your position in the field.
+
+### `compare_to_driver`
+Compare your best lap against one specific driver, corner by corner.
+
+**Parameters:** `car`, `track`, `driver` (full name, surname, or slug)
+
+**Returns:** the same analysis as `compare_my_laps`, against that person, plus
+where each of you sits in the standings.
+
+## Whose laps can you see?
+
+Garage61 has **no global lap search** — the API documents that laps outside your
+own teams are private. What you get is yourself plus everyone across all your
+Garage61 teams, which is usually a much larger pool than it sounds: for one
+account that resolves to 30 drivers on a single car/track combination, all with
+telemetry shared.
+
+`list_drivers` shows that whole field. `compare_my_telemetry_to_team` only ever
+compares against the single fastest lap in it.
 
 ### `get_team_fastest_lap`
 Get the team record lap from accessible data.
