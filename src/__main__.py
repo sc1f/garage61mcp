@@ -1,46 +1,59 @@
 """Entry point for the Garage61 MCP server."""
 
 import asyncio
-import os
 import logging
-from dotenv import load_dotenv
-from server import main as server_main
+import os
+import sys
 
-# Set up logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+# The modules in this directory import each other by bare name (`from tools
+# import ...`). That works when this file is run as a script, because Python
+# puts its directory on sys.path -- but not under `python -m garage61_mcp` or
+# via the console script. Adding it explicitly makes every entry point work.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from dotenv import load_dotenv  # noqa: E402
+
+from server import main as server_main  # noqa: E402
+
+
+def _configure_logging() -> None:
+    """Log to stderr; stdout is the MCP transport and must stay clean.
+
+    Defaults to WARNING because DEBUG logs entire telemetry payloads.
+    Override with GARAGE61_LOG_LEVEL=DEBUG when troubleshooting.
+    """
+    level_name = os.getenv("GARAGE61_LOG_LEVEL", "WARNING").upper()
+    logging.basicConfig(
+        level=getattr(logging, level_name, logging.WARNING),
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        stream=sys.stderr,
+    )
 
 
 def run():
     """Load environment and run the server."""
-    logger.info("Starting Garage61 MCP server entry point")
-    
-    # Load environment variables from .env file
+    _configure_logging()
+    logger = logging.getLogger(__name__)
+
     load_dotenv()
-    logger.debug("Environment variables loaded")
-    
-    # Check for required environment variables
-    token = os.getenv("GARAGE61_TOKEN")
-    if not token:
-        logger.error("GARAGE61_TOKEN environment variable not found")
-        print("Error: GARAGE61_TOKEN environment variable is required")
-        print("Please create a .env file with your Garage61 API token:")
-        print("GARAGE61_TOKEN=your-token-here")
-        exit(1)
-    
-    logger.info(f"Token found (length: {len(token)})")
-    
-    # Run the server
-    logger.info("Starting main server loop")
+
+    if not os.getenv("GARAGE61_TOKEN"):
+        print(
+            "Error: GARAGE61_TOKEN environment variable is required.\n"
+            "Set it in the MCP server config, or create a .env file containing:\n"
+            "GARAGE61_TOKEN=your-token-here",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    logger.info("Starting Garage61 MCP server")
     asyncio.run(server_main())
 
 
 def main():
     """Main entry point for package."""
     run()
+
 
 if __name__ == "__main__":
     main()

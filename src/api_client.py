@@ -9,7 +9,6 @@ from cache import get_cache
 
 # Set up logging
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
 
 
 class TrackInfo(BaseModel):
@@ -41,6 +40,12 @@ class DriverInfo(BaseModel):
         return self.slug
 
 
+class SectorTime(BaseModel):
+    """One sector split from a lap record."""
+    sectorTime: float
+    incomplete: bool = False
+
+
 class LapData(BaseModel):
     """Represents a lap record from the API."""
     id: str
@@ -53,6 +58,24 @@ class LapData(BaseModel):
     clean: bool
     canViewTelemetry: bool
     sessionType: int
+    # Present on most laps but not guaranteed, so everything below is optional.
+    sectors: Optional[List[SectorTime]] = None
+    trackTemp: Optional[float] = None
+    airTemp: Optional[float] = None
+    trackUsage: Optional[int] = None
+    tireCompound: Optional[int] = None
+    fuelLevel: Optional[float] = None
+    fuelUsed: Optional[float] = None
+    session: Optional[int] = None
+    run: Optional[int] = None
+    offtrack: Optional[bool] = None
+    incomplete: Optional[bool] = None
+    pitIn: Optional[bool] = None
+    pitOut: Optional[bool] = None
+
+    @property
+    def sector_times(self) -> List[float]:
+        return [s.sectorTime for s in (self.sectors or [])]
 
 
 class TelemetryChannel(BaseModel):
@@ -159,6 +182,92 @@ class Garage61Client:
             return track_id
         return None
     
+    def resolve_car_track(self, car_name: str, track_name: str) -> Dict[str, Any]:
+        """Resolve fuzzy car/track names to IDs, reporting what they matched.
+
+        Callers surface `car_resolved`/`track_resolved` in their output. Without
+        that, a fuzzy match onto the wrong car reads as "you haven't driven this
+        combination" and gives the user nothing to correct.
+        """
+        cache = get_cache()
+
+        car = cache.find_car(car_name)
+        if not car:
+            suggestions = cache.get_car_suggestions(car_name)
+            hint = (
+                f" Did you mean one of these? {', '.join(suggestions[:3])}."
+                if suggestions else ""
+            )
+            raise ValueError(
+                f"Car '{car_name}' not found.{hint} Use the list_cars tool to see all available cars."
+            )
+
+        track = cache.find_track(track_name)
+        if not track:
+            suggestions = cache.get_track_suggestions(track_name)
+            hint = (
+                f" Did you mean one of these? {', '.join(suggestions[:3])}."
+                if suggestions else ""
+            )
+            raise ValueError(
+                f"Track '{track_name}' not found.{hint} "
+                "Use the list_tracks tool to see all available tracks with variants."
+            )
+
+        car_id, car_resolved = car
+        track_id, track_resolved = track
+        logger.info(
+            f"Resolved '{car_name}' -> '{car_resolved}' ({car_id}), "
+            f"'{track_name}' -> '{track_resolved}' ({track_id})"
+        )
+        return {
+            "car_id": car_id,
+            "car_resolved": car_resolved,
+            "track_id": track_id,
+            "track_resolved": track_resolved,
+        }
+
+    async def get_my_laps(
+        self, car_name: str, track_name: str, limit: int = 200, clean_only: bool = False
+    ) -> Dict[str, Any]:
+        """Fetch the current user's full lap history for one car/track combination.
+
+        Returns every lap rather than a personal best, which is what makes
+        progression-over-time comparisons possible.
+        """
+        resolved = self.resolve_car_track(car_name, track_name)
+
+        params = {
+            "cars": [resolved["car_id"]],
+            "tracks": [resolved["track_id"]],
+            "drivers": ["me"],
+            "limit": limit,
+            "group": "none",   # every lap, not one personal best
+            "lapTypes": [1],   # full laps only
+        }
+
+        async with httpx.AsyncClient(timeout=60) as client:
+            try:
+                response = await client.get(
+                    f"{self.base_url}/laps", headers=self.headers, params=params
+                )
+                response.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 401:
+                    raise ValueError("Invalid authentication token")
+                raise ValueError(f"API error: {e.response.status_code} - {e.response.text}")
+            except httpx.RequestError as e:
+                raise ValueError(f"Network error: {str(e)}")
+
+            laps = [LapData(**lap) for lap in response.json().get("items", [])]
+
+        if clean_only:
+            laps = [lap for lap in laps if lap.clean]
+
+        laps.sort(key=lambda lap: lap.startTime)
+        resolved["laps"] = laps
+        return resolved
+
     async def get_laps(self, car_ids: List[int], track_ids: List[int], limit: int = 50, try_telemetry: bool = True) -> List[LapData]:
         """Fetch laps for specific car and track IDs. Tries with telemetry first, falls back without on 403."""
         async with httpx.AsyncClient() as client:
@@ -596,7 +705,8 @@ def create_client() -> Garage61Client:
         logger.error("GARAGE61_TOKEN environment variable is not set")
         raise ValueError("GARAGE61_TOKEN environment variable is required")
     
-    logger.debug(f"Token found: {token[:10]}..." if len(token) > 10 else "Token found")
+    # Never log any part of the token; length is enough to confirm it loaded.
+    logger.debug(f"Token loaded ({len(token)} characters)")
     base_url = os.getenv("GARAGE61_BASE_URL", "https://garage61.net/api/v1")
     logger.debug(f"Using base URL: {base_url}")
     return Garage61Client(token, base_url)

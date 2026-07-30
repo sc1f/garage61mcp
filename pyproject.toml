@@ -26,10 +26,12 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "mcp>=1.0.0",
     "httpx>=0.25.0",
     "python-dotenv>=1.0.0",
-    "pydantic>=2.0.0"
+    "pydantic>=2.0.0",
+    # mcp 2.x removed the low-level Server decorator API this server is built
+    # on; an unpinned install crashes on startup. See requirements.txt.
+    "mcp>=1.0.0,<2.0.0"
 ]
 
 [project.urls]
@@ -38,10 +40,11 @@ Repository = "https://github.com/yourusername/garage61-mcp"
 Issues = "https://github.com/yourusername/garage61-mcp/issues"
 
 [project.scripts]
-garage61-mcp = "__main__:main"
+garage61-mcp = "garage61_mcp.__main__:main"
 
-[tool.setuptools.package-dir]
-"" = "src"
-
-[tool.setuptools.py-modules]
-py-modules = ["__init__", "__main__", "server", "api_client", "cache", "tools"]
+# The sources live in src/ but install as the `garage61_mcp` package, so the
+# module layout and the distribution name line up without moving files that the
+# Claude Desktop config already points at.
+[tool.setuptools]
+package-dir = {garage61_mcp = "src"}
+packages = ["garage61_mcp"]

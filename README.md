@@ -1,20 +1,78 @@
 # Garage61 MCP Server
 
-A Model Context Protocol (MCP) server that connects Claude Desktop to Garage61's iRacing telemetry API. Get your personal best laps, world records, and telemetry data through natural language queries.
+A Model Context Protocol (MCP) server that connects Claude Desktop to Garage61's iRacing telemetry API. Ask about your lap times and telemetry in natural language, and — the main point — compare laps against each other to see exactly where the time goes.
 
 ## Features
 
-- 🏁 **Personal Best Laps**: Get your fastest times for any car/track combination
-- 🌍 **World Records**: Access fastest laps from all accessible drivers/teams  
-- 📊 **Telemetry Data**: View detailed CSV telemetry when available
-- 🔍 **Smart Search**: Fuzzy matching for car and track names
-- 🏎️ **Modern Cars**: Automatically prioritizes current generation vehicles
-- 🏁 **Track Variants**: Intelligent handling of track configurations
-- ⚡ **Graceful Degradation**: Works with both free and Pro Garage61 accounts
+- 📈 **Track your own progress**: compare any two of your own laps on the same car and track, and see precisely where you gained or lost time
+- ⏱️ **Real delta-time analysis**: time gaps are integrated from the speed traces, not estimated — the same calculation as a delta bar in the sim
+- 🏁 **Corner-by-corner**: corners are detected from the telemetry itself, with direction and type derived from GPS, so analysis reads "Turn 5 (slow right hairpin)" rather than "43-48% of lap"
+- 🗂️ **Real sector splits**: uses the track's actual timing sectors, not arbitrary quarters
+- 🧹 **Ignores compromised laps**: outlaps, spins and offs are detected and excluded from comparisons, with the reason reported
+- 📊 **Consistency analysis**: spread, per-sector variability, and your theoretical best lap across every clean lap
+- 🔬 **Raw data on demand**: pull the actual aligned channel values for any stretch of the lap when a summary isn't enough
+- 🏁 **Team comparison**: measure yourself against your team's fastest lap
+- 🔍 **Smart search**: fuzzy matching for car and track names
+- 🏎️ **Modern cars**: automatically prioritizes current generation vehicles
+- 🌡️ **Condition awareness**: flags when track temperature or fuel load differs enough to make a comparison unfair
+- ⚡ **Graceful degradation**: works with both free and Pro Garage61 accounts
+
+## Requirements
+
+- **Python 3.10+** (required for MCP package)
+- Node.js (for MCP Inspector testing)
+- Garage61 account ([garage61.net](https://garage61.net))
+
+**Check your Python version:**
+```bash
+python3 --version  # Should be 3.10 or higher
+```
+
+**If you need to upgrade Python with pyenv:**
+```bash
+# Install a newer Python version
+pyenv install 3.11.8
+
+# Set as global default
+pyenv global 3.11.8
+
+# Verify the version
+python3 --version
+```
 
 ## Quick Install
 
-### Option 1: Automated Setup (Recommended)
+### Option 1: Virtual Environment Setup (Recommended)
+
+```bash
+# Clone and set up virtual environment
+git clone <your-repo-url>
+cd garage61-mcp
+
+# Create and activate virtual environment
+python3 -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+
+# Upgrade pip for better pyproject.toml support
+pip install --upgrade pip
+
+# Install the package and its dependencies
+pip install -e .
+```
+
+> **Note:** `mcp` is pinned below 2.0. Version 2.x removed the low-level
+> `Server` decorator API this server is built on, and an unpinned install
+> crashes on startup with
+> `AttributeError: 'Server' object has no attribute 'list_tools'`.
+
+**Test your installation:**
+```bash
+# Test with MCP Inspector (from project root)
+export GARAGE61_TOKEN=your-token
+npx @modelcontextprotocol/inspector garage61-mcp
+```
+
+### Option 2: Automated Setup
 
 ```bash
 # Clone and install
@@ -28,20 +86,20 @@ This will:
 - Set up Claude Desktop configuration
 - Guide you through the token setup
 
-**Test your installation:**
+### Option 3: Manual Setup (if editable install fails)
+
+If you get "editable mode currently requires a setuptools-based build" error:
+
 ```bash
-# Test with MCP Inspector (from src directory)
-export GARAGE61_TOKEN=your-token
+# Install dependencies directly
+pip3 install "httpx>=0.25.0" "pydantic>=2.0.0" "python-dotenv>=1.0.0"
+pip3 install git+https://github.com/modelcontextprotocol/python-sdk.git
+
+# Run directly from src directory
 cd src
-npx @modelcontextprotocol/inspector python3 __main__.py
+export GARAGE61_TOKEN=your-token
+python3 __main__.py
 ```
-
-### Option 2: Manual Setup
-
-1. **Install the package**:
-   ```bash
-   pip install -e .
-   ```
 
 2. **Get your Garage61 API token** from [garage61.net](https://garage61.net)
 
@@ -68,7 +126,22 @@ npx @modelcontextprotocol/inspector python3 __main__.py
    }
    ```
 
-   **Alternative (after pip install):**
+   **Option A: Virtual Environment (recommended):**
+   ```json
+   {
+     "mcpServers": {
+       "garage61": {
+         "command": "/path/to/your/project/.venv/bin/python",
+         "args": ["-m", "garage61_mcp"],
+         "env": {
+           "GARAGE61_TOKEN": "your-garage61-token-here"
+         }
+       }
+     }
+   }
+   ```
+
+   **Option B: Global Install:**
    ```json
    {
      "mcpServers": {
@@ -88,20 +161,30 @@ npx @modelcontextprotocol/inspector python3 __main__.py
 
 Ask Claude natural language questions about iRacing data:
 
-### Personal Performance
+### Tracking your own progress
+- *"Show me all my laps in the Porsche 992 GT3 R at Spa"*
+- *"Why was my last lap at Spa slower than my personal best?"*
+- *"Compare my most recent Monza lap to my fastest one"*
+- *"Am I getting quicker at the Nordschleife in the M4 GT3?"*
+- *"Compare my laps from April to the ones I set last week"*
+
+### Personal performance
 - *"What's my fastest lap with the Mazda MX-5 at Lime Rock Park?"*
 - *"Show me my personal best at Nürburgring with the BMW M4 GT3"*
-- *"Get my fastest lap telemetry for Porsche at Spa"*
 
-### World Records & Comparisons  
-- *"What's the world record for Mercedes AMG GT3 at Silverstone?"*
-- *"Show me the fastest lap overall at Monza with the McLaren 720S"*
-- *"Who has the fastest lap at Road America with the Audi R8?"*
+### Team records and comparisons
+- *"What's the team record for Mercedes AMG GT3 at Silverstone?"*
+- *"Show me where I'm losing time compared to my teammate's fastest lap"*
+- *"Compare my telemetry to the team fastest lap at Spa with the Porsche 992 GT3"*
+
+### Drilling into a comparison
+- *"Which corners am I losing the most time in?"*
+- *"Look at sector 2 in detail"*
+- *"What's happening between 45% and 60% of the lap?"*
 
 ### Discovery
 - *"What cars are available that match 'porsche'?"*
 - *"Show me all track variants for Nürburgring"*
-- *"List modern GT3 cars"*
 
 ## MCP Tools
 
@@ -120,29 +203,130 @@ Find available tracks with all variants and exact names.
 **Parameters:**
 - `search_term` (optional): Filter tracks (e.g., "spa", "silverstone")
 
+### `list_my_laps`
+List every lap you've set on a car/track combination.
+
+**Parameters:**
+- `car`: Exact car name from `list_cars`
+- `track`: Exact track name from `list_tracks`
+- `clean_only` (optional): Only include laps flagged clean
+
+**Returns:**
+- A table of every lap: date, lap time, gap to your personal best, sector splits,
+  whether telemetry is available, and the conditions it was set in
+- A progression summary comparing your latest lap to your earliest and your best
+
+### `compare_my_laps`
+Compare two of your own laps and attribute the gap across the lap. This is the
+main tool for tracking progress over time.
+
+**Parameters:**
+- `car`: Exact car name from `list_cars`
+- `track`: Exact track name from `list_tracks`
+- `reference` (optional): The benchmark lap. Defaults to `fastest`.
+- `compared` (optional): The lap measured against it. Defaults to `latest`.
+
+Both selectors accept `fastest`, `slowest`, `latest`, `oldest`, a lap number
+from `list_my_laps`, or a date such as `2026-04-04`.
+
+**Returns:**
+- Lap times, the gap, and per-sector splits
+- A ranked explanation of where the time went, with the likely cause
+- A segment table with minimum speeds, braking points, and full-throttle share
+- The cumulative time gap around the lap
+- A warning when track temperature or fuel load differed enough to make the
+  comparison unfair
+
 ### `get_my_fastest_lap`
-Get your personal fastest lap and telemetry.
+Get a summary of your personal best lap.
 
 **Parameters:**
 - `car`: Exact car name from `list_cars`
 - `track`: Exact track name from `list_tracks` 
 
 **Returns:**
-- Your fastest lap time
-- Driver info and lap ID
-- Telemetry data (if available/Pro plan)
+- Lap time and sector splits
+- Top, minimum, and average speed; full-throttle and braking share
+- A coarse speed trace around the lap
+- The conditions it was set in
 
-### `get_world_fastest_lap`
-Get the world record lap from accessible data.
+### `get_team_fastest_lap`
+Get the team record lap from accessible data.
 
 **Parameters:**
 - `car`: Exact car name from `list_cars`
 - `track`: Exact track name from `list_tracks`
 
 **Returns:**
-- World record lap time
+- Team record lap time
 - Driver info and lap ID  
+- Comparison with your personal best
 - Telemetry data (if available/Pro plan)
+
+### `compare_my_telemetry_to_team`
+Compare your fastest lap telemetry to the team fastest lap with detailed analysis.
+
+**Parameters:**
+- `car`: Exact car name from `list_cars`
+- `track`: Exact track name from `list_tracks`
+
+**Requirements:**
+- You must have a recorded lap for this car/track combination
+- Team must have a recorded lap for this car/track combination  
+- You cannot be the team fastest lap holder (no comparison needed)
+- Both laps must have telemetry data available (Pro plan typically required)
+
+**Returns:** the same analysis as `compare_my_laps`, against the team's best lap.
+
+### `analyze_consistency`
+Analyse every representative lap at once.
+
+**Parameters:** `car`, `track`
+
+**Returns:**
+- Lap time spread and standard deviation across all clean laps
+- Per-sector best/median/worst and which sector you're least consistent in
+- Your theoretical best lap from your fastest sectors
+- Pace by session date, with track temperature, and the overall trend
+
+### `analyze_worst_sections`, `analyze_telemetry_sector`, `analyze_telemetry_range`, `get_channel_window`
+Drill into the most recent comparison for a car/track. Run `compare_my_laps` or
+`compare_my_telemetry_to_team` first — these read the stored comparison rather
+than re-downloading telemetry.
+
+- `analyze_worst_sections` ranks the corners where time is lost
+- `analyze_telemetry_sector` takes a `sector` number
+- `analyze_telemetry_range` takes `start_pct` and `end_pct` (0-100)
+- `get_channel_window` returns the raw aligned values for both laps across a
+  range, as a numeric table. Takes `start_pct`, `end_pct`, an optional
+  `channels` list (speed, throttle, brake, gear, rpm, steering, lat_accel,
+  long_accel) and an optional `points` count. Use it when the summaries don't
+  settle a question and you want to read the traces yourself.
+
+## How the analysis is split
+
+The server does what is numerically hard — alignment, resampling, delta-time
+integration, corner detection, unit conversion. It deliberately does **not** try
+to explain *why* a corner was slower; it reports measurements and leaves the
+reasoning to the model reading them.
+
+That split is why `get_channel_window` exists. An earlier version generated its
+own explanations from heuristics and produced things like "lost 0.449s — minimum
+speed 5.5 km/h *higher*", which explains nothing. Facts plus the ability to pull
+real numbers on demand works far better.
+
+## How the time comparison works
+
+Time gaps are not estimated from speed differences — they are integrated from the
+speed traces. Time around a lap is `t = L * ∫ dd/v`, so the gap between two laps
+is `L * ∫ (1/v_b - 1/v_a) dd`. Track length `L` is recovered from each lap by
+inverting that same relation against the known lap time, which self-calibrates
+against the API's units instead of relying on a track-length table.
+
+The integrated gap is checked against the gap implied by the lap times, and the
+discrepancy is reported in every comparison rather than hidden. In practice it
+lands within about 0.1s over a 3.5s gap, and the derived track length comes
+within about 1% of the real figure.
 
 ## Telemetry Access
 
@@ -218,7 +402,7 @@ In the MCP Inspector web interface, you can:
 
 2. **Test telemetry tools**:
    - `get_my_fastest_lap` with exact car/track names
-   - `get_world_fastest_lap` with exact car/track names
+   - `list_my_laps` and `compare_my_laps` with exact car/track names
 
 3. **View detailed logs** to debug any issues
 
@@ -262,16 +446,18 @@ print(f'API Status: {response.status_code}')
 ### Project Structure
 ```
 garage61_mcp/
-├── src/
+├── src/                 # installs as the `garage61_mcp` package
 │   ├── __init__.py
-│   ├── __main__.py      # Entry point  
-│   ├── server.py        # MCP server
-│   ├── api_client.py    # Garage61 API
-│   ├── cache.py         # Smart search
-│   └── tools.py         # MCP tools
+│   ├── __main__.py      # Entry point
+│   ├── server.py        # MCP server and tool dispatch
+│   ├── api_client.py    # Garage61 API client
+│   ├── cache.py         # Car/track fuzzy search
+│   ├── telemetry.py     # Parsing, resampling, delta-time maths
+│   ├── formatting.py    # Analysis results -> Markdown
+│   └── tools.py         # MCP tool implementations
 ├── pyproject.toml       # Package config
-├── install.py          # Auto-installer
-├── CLAUDE.md           # Development docs
+├── install.py           # Auto-installer
+├── CLAUDE.md            # Development docs
 └── README.md
 ```
 
@@ -308,7 +494,7 @@ garage61_mcp/
    - Test with natural language queries
 
 ### Requirements
-- Python 3.10+
+- **Python 3.10+** (required for MCP package)
 - Node.js (for MCP Inspector)
 - Garage61 account ([garage61.net](https://garage61.net))
 - Claude Desktop

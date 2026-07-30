@@ -1,4 +1,9 @@
 httpx>=0.25.0
-mcp>=1.0.0
 pydantic>=2.0.0
 python-dotenv>=1.0.0
+
+# mcp 2.x replaced the low-level Server decorator API (@server.list_tools /
+# @server.call_tool) that server.py is built on, so an unpinned install picks up
+# 2.0 and the server crashes on startup with AttributeError. Pin below 2.0 until
+# the server is migrated to the new MCPServer API.
+mcp>=1.0.0,<2.0.0
