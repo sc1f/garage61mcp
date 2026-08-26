@@ -170,7 +170,10 @@ app = create_app()
 def main() -> None:
     import uvicorn
 
-    level = os.getenv("GARAGE61_LOG_LEVEL", "WARNING").upper()
+    # Unlike the stdio entry point (where stderr chatter gets in the way and
+    # WARNING is right), an HTTP server should say where it is listening and
+    # log each request. DEBUG still dumps telemetry payloads -- opt-in only.
+    level = os.getenv("GARAGE61_LOG_LEVEL", "INFO").upper()
     logging.basicConfig(
         level=getattr(logging, level, logging.WARNING),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
