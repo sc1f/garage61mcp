@@ -356,6 +356,34 @@ discrepancy is reported in every comparison rather than hidden. In practice it
 lands within about 0.1s over a 3.5s gap, and the derived track length comes
 within about 1% of the real figure.
 
+## Remote hosting (HTTP transport)
+
+The server also runs as a remote MCP over streamable HTTP:
+
+```bash
+pip install -e .
+garage61-mcp-http          # serves http://127.0.0.1:8080/mcp
+```
+
+Every request must carry the caller's own Garage61 personal access token:
+
+```
+Authorization: Bearer <your-garage61-token>
+```
+
+There is no server-side token: each user brings their own, so one deployment
+serves any number of users, each seeing exactly their own Garage61 data.
+Add it to Claude Code with:
+
+```bash
+claude mcp add --transport http garage61 http://127.0.0.1:8080/mcp --header "Authorization: Bearer <token>"
+```
+
+A `Dockerfile` is included; the image binds `0.0.0.0:$PORT` and works as-is on
+AWS App Runner, Fly.io, or any container host. `/healthz` is an unauthenticated
+health check. Set `GARAGE61_MCP_ALLOWED_HOSTS` to enable DNS-rebinding
+protection when exposing the server directly without a proxy.
+
 ## Telemetry Access
 
 - **Free Account**: Lap times and basic data

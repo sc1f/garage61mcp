@@ -21,6 +21,7 @@ from formatting import (
     lap_summary,
 )
 from lapquality import split_usable
+from reqcontext import user_scope
 from telemetry import (
     Corner,
     build_corner_map,
@@ -47,8 +48,20 @@ _corner_map_cache: Dict[str, List[Corner]] = {}
 CORNER_MAP_SAMPLE = 4
 
 
-def _cache_key(car: str, track: str) -> str:
+def _combo_key(car: str, track: str) -> str:
     return f"{car.strip().lower()}::{track.strip().lower()}"
+
+
+def _cache_key(car: str, track: str) -> str:
+    """Key for the comparison cache: scoped per user.
+
+    Comparisons hold lap telemetry that is private to whoever fetched it. Over
+    HTTP the server is multi-tenant, so two users comparing the same car/track
+    must never read each other's entries. The corner map deliberately does NOT
+    use this key -- it is track geometry (apex positions, angles), identical for
+    everyone, and sharing it across users saves telemetry downloads.
+    """
+    return f"{user_scope()}::{_combo_key(car, track)}"
 
 
 async def _get_corner_map(
@@ -60,7 +73,7 @@ async def _get_corner_map(
     corner count depends on that driver's line -- at Tsukuba the same car gives
     11 to 13 corners across nine drivers.
     """
-    key = _cache_key(car, track)
+    key = _combo_key(car, track)
     if key in _corner_map_cache:
         return _corner_map_cache[key]
 

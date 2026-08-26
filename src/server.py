@@ -124,16 +124,12 @@ async def _dispatch(name: str, arguments: dict) -> list[TextContent]:
     return [TextContent(type="text", text=f"**Error**: Unknown tool '{name}'")]
 
 
-async def main():
-    """Main entry point for the MCP server."""
-    logger.info("Starting Garage61 MCP server")
+def build_server() -> Server:
+    """Construct the MCP Server with all tools registered.
 
-    try:
-        await initialize_cache()
-    except Exception as e:
-        logger.error(f"Failed to initialize cache: {e}")
-        logger.warning("Server will continue but car/track resolution may fail")
-
+    Shared by the stdio entry point (single user, env token) and the HTTP entry
+    point (multi-user, per-request tokens). Transport concerns stay out of here.
+    """
     server = Server("garage61-mcp")
 
     @server.list_tools()
@@ -146,12 +142,31 @@ async def main():
         """Handle tool calls."""
         logger.info(f"Tool called: {name} with arguments: {arguments}")
         try:
+            # No-op when already filled; fills lazily on the HTTP path where
+            # no token exists at process startup.
+            from api_client import ensure_cache
+            await ensure_cache()
             return await _dispatch(name, arguments or {})
         except Exception as e:
             # Surfacing the failure beats raising, which shows the user an
             # opaque transport error with no indication of what went wrong.
             logger.error(f"Error in tool execution: {e}", exc_info=True)
             return [TextContent(type="text", text=f"**Error**: {name} failed: {e}")]
+
+    return server
+
+
+async def main():
+    """Main entry point for the stdio MCP server."""
+    logger.info("Starting Garage61 MCP server")
+
+    try:
+        await initialize_cache()
+    except Exception as e:
+        logger.error(f"Failed to initialize cache: {e}")
+        logger.warning("Server will continue but car/track resolution may fail")
+
+    server = build_server()
 
     logger.info("Starting stdio server")
     async with stdio_server() as (read_stream, write_stream):

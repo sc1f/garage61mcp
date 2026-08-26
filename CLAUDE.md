@@ -49,6 +49,30 @@ immediately. **Do not reintroduce heuristic cause-finding into the server.** If
 the caller needs more evidence, the answer is `get_channel_window`, which hands
 back real numbers for any stretch of the lap.
 
+## Transports
+
+Two entry points share one Server (`server.build_server`):
+- **stdio** (`src/__main__.py`) — single user, token from `GARAGE61_TOKEN` env.
+  This is what Claude Desktop launches.
+- **HTTP** (`src/http_server.py`, `garage61-mcp-http`) — multi-user streamable
+  HTTP on `/mcp` (stateless, JSON responses). Every request must carry the
+  caller's own Garage61 PAT as `Authorization: Bearer <token>`; tokens are
+  verified against `/me` with a 10-minute cache and bound to a contextvar
+  (`reqcontext.py`) that `create_client()` reads.
+
+Multi-tenancy rules that must not regress:
+- The comparison cache is keyed per user (`_cache_key` includes `user_scope()`),
+  because it holds private lap telemetry. Two users comparing the same
+  car/track must never share entries.
+- The corner map cache is deliberately global (`_combo_key`): it is track
+  geometry, identical for everyone, and sharing saves telemetry downloads.
+- The cars/tracks cache fills lazily on the HTTP path (`ensure_cache`), since
+  no token exists at process startup.
+- Never bake a token into the HTTP image or read the env token on the HTTP
+  path for a request that carried none.
+
+`Dockerfile` runs the HTTP entry point; no secrets in the image.
+
 ## Setup
 1. Get a Garage61 API token from https://garage61.net
 2. Create a `.env` file with `GARAGE61_TOKEN=your-token-here`, or set the

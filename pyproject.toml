@@ -31,7 +31,8 @@ dependencies = [
     "pydantic>=2.0.0",
     # mcp 2.x removed the low-level Server decorator API this server is built
     # on; an unpinned install crashes on startup. See requirements.txt.
-    "mcp>=1.0.0,<2.0.0"
+    "mcp>=1.0.0,<2.0.0",
+    "uvicorn>=0.30.0"
 ]
 
 [project.urls]
@@ -41,6 +42,7 @@ Issues = "https://github.com/yourusername/garage61-mcp/issues"
 
 [project.scripts]
 garage61-mcp = "garage61_mcp.__main__:main"
+garage61-mcp-http = "garage61_mcp.http_server:main"
 
 # The sources live in src/ but install as the `garage61_mcp` package, so the
 # module layout and the distribution name line up without moving files that the

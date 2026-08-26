@@ -1,5 +1,6 @@
 """Garage61 API client for fetching iRacing telemetry data."""
 
+import asyncio
 import os
 import logging
 from typing import Any, Dict, List, Optional
@@ -764,11 +765,17 @@ class Garage61Client:
 
 
 def create_client() -> Garage61Client:
-    """Create a Garage61 client from environment variables."""
+    """Create a Garage61 client for the current caller.
+
+    Over HTTP the token comes from the request's auth context (each request may
+    be a different user); the stdio server falls back to the process-wide
+    GARAGE61_TOKEN environment variable.
+    """
     logger.debug("Creating Garage61 client")
-    token = os.getenv("GARAGE61_TOKEN")
+    from reqcontext import get_request_token
+    token = get_request_token() or os.getenv("GARAGE61_TOKEN")
     if not token:
-        logger.error("GARAGE61_TOKEN environment variable is not set")
+        logger.error("No Garage61 token in request context or environment")
         raise ValueError("GARAGE61_TOKEN environment variable is required")
     
     # Never log any part of the token; length is enough to confirm it loaded.
@@ -776,6 +783,29 @@ def create_client() -> Garage61Client:
     base_url = os.getenv("GARAGE61_BASE_URL", "https://garage61.net/api/v1")
     logger.debug(f"Using base URL: {base_url}")
     return Garage61Client(token, base_url)
+
+
+_cache_init_lock: Optional[asyncio.Lock] = None
+
+
+async def ensure_cache() -> None:
+    """Fill the cars/tracks cache if it is still empty.
+
+    The stdio server warms this at startup with the env token. The HTTP server
+    has no token until a request arrives, so the first authenticated request
+    triggers the fill (the lists are global, not user-specific — any valid
+    token works). A lock stops concurrent first-requests from racing.
+    """
+    global _cache_init_lock
+    cache = get_cache()
+    if cache.cars and cache.tracks:
+        return
+    if _cache_init_lock is None:
+        _cache_init_lock = asyncio.Lock()
+    async with _cache_init_lock:
+        if cache.cars and cache.tracks:
+            return
+        await initialize_cache()
 
 
 async def initialize_cache() -> None:
