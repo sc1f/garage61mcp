@@ -1,5 +1,6 @@
 """MCP tools for Garage61 telemetry data."""
 
+import asyncio
 import logging
 import math
 import statistics
@@ -1479,7 +1480,11 @@ async def analyze_corner(
         )
         rows = []
         tin_vals, pb_vals, min_vals, rev_vals = [], [], [], []
-        for lap_rec in chosen:
+        for pace_i, lap_rec in enumerate(chosen):
+            if pace_i:
+                # The limiter is a refilling bucket; spacing the stint's
+                # downloads keeps a cold 8-lap fetch inside the burst allowance.
+                await asyncio.sleep(0.3)
             csv_data = await client.get_lap_telemetry_csv(lap_rec.id)
             if not csv_data:
                 continue

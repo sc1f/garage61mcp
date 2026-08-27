@@ -74,9 +74,20 @@ Multi-tenancy rules that must not regress:
   no token exists at process startup.
 - The telemetry CSV cache (`api_client._telemetry_csv_cache`) is keyed per
   (user, lap): laps are immutable so caching is safe, but serving user B a CSV
-  fetched with user A's token would bypass Garage61's authorization. Repeat
-  downloads were the bulk of our API traffic and were tripping Garage61's rate
-  limit (429s carry `retryAfterSeconds`, which the error messages surface).
+  fetched with user A's token would bypass Garage61's authorization.
+- Lap lists get a 60s TTL cache (`_lap_list_cache`) — they must refresh as new
+  laps appear, but within one conversation every tool otherwise refetches the
+  same list. A 7-tool analysis conversation costs 6 API requests total.
+
+Rate limiting (per https://garage61.net/developer/rate-limits): the API is a
+continuously refilling token bucket per (application, user, operation); exact
+allowances are unpublished. 429 bodies carry `details.retryAfterSeconds` (there
+is no Retry-After header). Every request goes through `_api_get`, which:
+retries once for waits ≤20s after sleeping retryAfterSeconds plus jitter;
+fails fast with the wait time for longer ones; and records the block so
+subsequent calls to that operation fail immediately client-side instead of
+sending more requests ("pause the affected operation" per the docs). Never
+bypass `_api_get` for a Garage61 call.
 - Never bake a token into the HTTP image or read the env token on the HTTP
   path for a request that carried none.
 
