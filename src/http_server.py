@@ -9,10 +9,14 @@ that user.
 Environment:
     HOST / PORT                     bind address (default 127.0.0.1:8080)
     GARAGE61_MCP_ALLOWED_HOSTS      comma list enabling DNS-rebinding protection
+    GARAGE61_MCP_ACCESS_KEY         if set, every request must also carry it as
+                                    X-MCP-Access-Key -- makes the endpoint
+                                    effectively private (strangers cost nothing)
     GARAGE61_LOG_LEVEL              WARNING by default
 """
 
 import contextlib
+import hmac
 import logging
 import os
 import sys
@@ -41,6 +45,31 @@ GARAGE61_API = os.getenv("GARAGE61_BASE_URL", "https://garage61.net/api/v1")
 # Token verification results, keyed by the raw token, kept briefly so each
 # request does not cost an extra upstream round-trip. Failures are cached too,
 # so a bad token cannot be used to hammer Garage61 through us.
+# Requests larger than this are rejected before the body is read. MCP tool
+# calls are a few hundred bytes; anything bigger is not a legitimate client.
+_MAX_BODY_BYTES = 256 * 1024
+
+# Upstream verification limiter: every *unique* unknown token costs one
+# Garage61 /me call, so a flood of random tokens would otherwise turn this
+# server into an amplifier pointed at their API. Token bucket: small burst,
+# steady refill; beyond it, unknown tokens are rejected without any upstream
+# traffic (known-good tokens ride the verify cache and are unaffected).
+_VERIFY_BURST = 10.0
+_VERIFY_REFILL_PER_S = 1.0
+_verify_bucket = {"level": _VERIFY_BURST, "at": time.monotonic()}
+
+
+def _verification_allowed() -> bool:
+    now = time.monotonic()
+    b = _verify_bucket
+    b["level"] = min(_VERIFY_BURST, b["level"] + (now - b["at"]) * _VERIFY_REFILL_PER_S)
+    b["at"] = now
+    if b["level"] < 1.0:
+        return False
+    b["level"] -= 1.0
+    return True
+
+
 _VERIFY_TTL_S = 600
 _VERIFY_FAIL_TTL_S = 60
 _verify_cache: dict[str, tuple[bool, float]] = {}
@@ -53,6 +82,12 @@ async def _verify_token(token: str) -> bool:
     hit = _verify_cache.get(token)
     if hit and hit[1] > now:
         return hit[0]
+
+    if not _verification_allowed():
+        # Do not cache: a legitimate new user arriving during a flood should
+        # succeed on retry once the bucket refills.
+        logger.warning("Token verification rate limit hit; rejecting without upstream call")
+        return False
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -93,6 +128,30 @@ class BearerAuthMiddleware:
             return
 
         headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+
+        # Optional private mode: with an access key configured, requests
+        # without it are rejected before any work happens. Constant-time
+        # comparison; the key is a gate, not a user identity.
+        access_key = os.getenv("GARAGE61_MCP_ACCESS_KEY", "")
+        if access_key:
+            supplied = headers.get("x-mcp-access-key", "")
+            if not hmac.compare_digest(supplied, access_key):
+                response = _unauthorized("Missing or invalid X-MCP-Access-Key.")
+                await response(scope, receive, send)
+                return
+
+        # Reject oversized bodies before reading them.
+        try:
+            content_length = int(headers.get("content-length", "0"))
+        except ValueError:
+            content_length = _MAX_BODY_BYTES + 1
+        if content_length > _MAX_BODY_BYTES:
+            response = JSONResponse(
+                {"error": "payload_too_large"}, status_code=413
+            )
+            await response(scope, receive, send)
+            return
+
         auth = headers.get("authorization", "")
         if not auth.lower().startswith("bearer ") or not auth[7:].strip():
             response = _unauthorized(

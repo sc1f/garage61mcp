@@ -93,6 +93,17 @@ bypass `_api_get` for a Garage61 call.
 
 `Dockerfile` runs the HTTP entry point; no secrets in the image.
 
+Abuse hardening on the HTTP path (`http_server.py`): oversized bodies are
+rejected at 256 KB by Content-Length before being read; unknown-token
+verifications go through a token bucket (burst 10, 1/s refill) so a flood of
+random tokens cannot amplify into Garage61 `/me` traffic — cached tokens are
+unaffected; and setting `GARAGE61_MCP_ACCESS_KEY` requires every request to
+carry `X-MCP-Access-Key` (constant-time compare), making the endpoint
+effectively private. `/healthz` stays open for load-balancer checks and
+returns nothing but `{"status":"ok"}`. On App Runner, cap auto-scaling at max
+1 instance: App Runner bills instance-hours, not requests, so the instance cap
+is the actual bill ceiling (~$15/mo flat-out vs ~$3-5 idle).
+
 ## Setup
 1. Get a Garage61 API token from https://garage61.net
 2. Create a `.env` file with `GARAGE61_TOKEN=your-token-here`, or set the
