@@ -5,6 +5,8 @@ Returning eight thousand rows of CSV is the same as returning nothing, so
 everything here summarises rather than dumps.
 """
 
+import math
+
 from typing import List, Optional, Sequence
 
 from telemetry import (
@@ -287,6 +289,12 @@ def comparison_report(
         parts.append("")
         parts.append(corner_table(comparison.corners))
         parts.append("")
+        dynamics = corner_dynamics_table(comparison.corners)
+        if dynamics:
+            parts.append("### Corner dynamics")
+            parts.append("")
+            parts.append(dynamics)
+            parts.append("")
 
     trace = delta_trace_sparkline(comparison)
     if trace:
@@ -361,4 +369,63 @@ def lap_summary(lap: LapTelemetry, title: str, sector_times: Sequence[float] = (
         thinned = [v * MS_TO_KMH for v in downsample(speed, 50)]
         parts.append(f"```\n{uniform_series(thinned, 0.0, 100.0, fmt='{:.0f}')}\n```")
 
+    return "\n".join(parts)
+
+
+def corner_dynamics_table(corners: Sequence[CornerComparison]) -> str:
+    """Input-shape measurements per corner, both laps side by side.
+
+    Facts with definitions; whether a shape is right for this car and corner is
+    the reader's call.
+    """
+    rows = []
+    flag_notes = []
+    for c in corners:
+        d, r = c.dynamics, c.ref_dynamics
+        if d is None or r is None:
+            continue
+
+        def num(v, spec="{:.2f}"):
+            return spec.format(v) if v is not None else "-"
+
+        def deg(v, spec="{:.0f}"):
+            return spec.format(math.degrees(v)) if v is not None else "-"
+
+        rows.append([
+            f"T{c.corner.number}",
+            num(d.turn_in_pct and d.turn_in_pct * 100), num(r.turn_in_pct and r.turn_in_pct * 100),
+            deg(d.steer_peak_rad), deg(r.steer_peak_rad),
+            num(d.steer_mid_ratio), num(r.steer_mid_ratio),
+            deg(d.reversal_rad), deg(r.reversal_rad),
+            num(d.coupling), num(r.coupling),
+            deg(d.steer_at_release_rad), deg(r.steer_at_release_rad),
+            num(d.thr_t100_s), num(r.thr_t100_s),
+            num(d.partial_hold_s), num(r.partial_hold_s),
+            num(d.event_spread_m, "{:.0f}"), num(r.event_spread_m, "{:.0f}"),
+            num(c.line_apex_m, "{:+.1f}"),
+        ])
+        if d.flags:
+            flag_notes.append(f"T{c.corner.number}: {'; '.join(d.flags)}")
+    if not rows:
+        return ""
+
+    headers = ["#", "tInL", "tInR", "stL", "stR", "midL", "midR", "revL", "revR",
+               "cplL", "cplR", "srlL", "srlR", "t100L", "t100R", "hldL", "hldR",
+               "sprL", "sprR", "lineA"]
+    parts = [
+        f"```\n{fixed_table(headers, rows)}\n```",
+        "_L=this lap, R=reference. tIn = first sustained steering, lap-distance %. "
+        "st = peak steering deg. mid = steering at build midpoint / half of peak "
+        "(1 linear, <1 progressive, >1 front-loaded). rev = largest mid-corner "
+        "drop in steering toward the corner, deg — countersteer included, so it "
+        "can exceed the peak. cpl = share of the brake release spent with "
+        "steering present (0 = brake then turn, 1 = fully shared). srl = "
+        "steering deg at full brake release. t100 = seconds from first throttle "
+        "to full. hld = seconds at 10-80% throttle with steering loaded and no "
+        "longitudinal acceleration. spr = span in metres covering brake release, "
+        "peak steering, peak yaw rate, min speed and first throttle. lineA = "
+        "metres left (+) or right (−) of the reference line at the apex._",
+    ]
+    if flag_notes:
+        parts.append("**Flagged (this lap):** " + " | ".join(flag_notes))
     return "\n".join(parts)

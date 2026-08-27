@@ -323,6 +323,14 @@ Drill into the most recent comparison for a car/track. Run `compare_my_laps` or
 than re-downloading telemetry.
 
 - `analyze_worst_sections` ranks the corners where time is lost
+- `analyze_corner` takes a `corner_number` and reports everything measured about
+  it: where brake release, peak steering, peak yaw rate, minimum speed and first
+  throttle each fall (and how tightly they converge), steering shape, brake and
+  steering overlap, throttle ramp, line offset vs the reference, and ABS
+  activity. With `all_laps: true` it runs the same corner across the whole
+  stint and reports the spread of turn-in, peak pressure, minimum speed and
+  correction size — for finding *which corner* varies when sector numbers are
+  too coarse.
 - `analyze_telemetry_sector` takes a `sector` number
 - `analyze_telemetry_range` takes `start_pct` and `end_pct` (0-100)
 - `get_channel_window` returns the raw aligned values for both laps across a

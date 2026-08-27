@@ -66,6 +66,8 @@ def _cache_key(car: str, track: str) -> str:
     return f"{user_scope()}::{_combo_key(car, track)}"
 
 
+
+
 async def _get_corner_map(
     client, car: str, track: str, already_loaded: Sequence[Any] = ()
 ) -> List[Corner]:
@@ -337,14 +339,19 @@ async def compare_my_laps(
                 splits.append(f"S{i} {cmp_t - ref_t:+.3f}s")
             notes.append(f"**Sector splits**: {'  '.join(splits)}")
 
+        # Conditions are printed with every comparison, not only when they
+        # differ: a clean-looking delta on different track temperature or fuel
+        # is a different comparison, and the reader should never have to ask.
+        notes.append(
+            f"**Conditions**: this lap {format_conditions(cmp_lap)} / "
+            f"reference {format_conditions(ref_lap)}"
+        )
         conditions = []
         if ref_lap.trackTemp is not None and cmp_lap.trackTemp is not None:
             drift = cmp_lap.trackTemp - ref_lap.trackTemp
             if abs(drift) >= 2.0:
                 conditions.append(
-                    f"track temperature differs by {drift:+.1f}°C "
-                    f"({ref_lap.trackTemp:.1f}°C vs {cmp_lap.trackTemp:.1f}°C), "
-                    "which affects grip"
+                    f"track temperature differs by {drift:+.1f}°C, which affects grip"
                 )
         if ref_lap.fuelLevel is not None and cmp_lap.fuelLevel is not None:
             fuel = cmp_lap.fuelLevel - ref_lap.fuelLevel
@@ -720,14 +727,16 @@ async def compare_to_driver(car: str, track: str, driver: str) -> list[TextConte
             )
             notes.append(f"**Sector splits**: {splits}")
 
+        notes.append(
+            f"**Conditions**: you {format_conditions(my_lap)} / "
+            f"{their_name} {format_conditions(their_lap)}"
+        )
         conditions = []
         if my_lap.trackTemp is not None and their_lap.trackTemp is not None:
             drift = my_lap.trackTemp - their_lap.trackTemp
             if abs(drift) >= 3.0:
                 conditions.append(
-                    f"track temperature differs by {drift:+.1f}°C "
-                    f"({their_lap.trackTemp:.1f}°C for them, "
-                    f"{my_lap.trackTemp:.1f}°C for you)"
+                    f"track temperature differs by {drift:+.1f}°C, which affects grip"
                 )
         if conditions:
             notes.append(f"⚠️ **Caveat**: {'; '.join(conditions)}.")
@@ -1109,6 +1118,8 @@ CHANNEL_ALIASES = {
     "steering": "steering",
     "lat_accel": "lat_accel",
     "long_accel": "long_accel",
+    "yaw_rate": "yaw_rate",
+    "abs": "abs",
 }
 
 # Rendered in the caller's units rather than raw SI, so the numbers can be read
@@ -1122,6 +1133,8 @@ CHANNEL_RENDER = {
     "steering": ("deg", lambda v: math.degrees(v), 1),
     "lat_accel": ("m/s2", lambda v: v, 1),
     "long_accel": ("m/s2", lambda v: v, 1),
+    "yaw_rate": ("deg/s", lambda v: math.degrees(v), 1),
+    "abs": ("", lambda v: v, 0),
 }
 
 
@@ -1183,7 +1196,9 @@ async def get_channel_window(
 
         requested = [c.strip().lower() for c in (channels or ["speed", "brake", "throttle"])]
         if "all" in requested:
-            requested = list(CHANNEL_ALIASES)
+            requested = list(CHANNEL_ALIASES) + ["line"]
+        want_line = "line" in requested and bool(comparison.line_offset)
+        requested = [c for c in requested if c != "line"]
         resolved, unknown = [], []
         for name in requested:
             target = CHANNEL_ALIASES.get(name)
@@ -1212,11 +1227,14 @@ async def get_channel_window(
         ref_t0 = ref_clock[start_idx] if ref_clock else 0.0
 
         short = {"speed": "spd", "throttle": "thr", "brake": "brk", "gear": "gr",
-                 "rpm": "rpm", "steering": "str", "lat_accel": "latg", "long_accel": "lngg"}
+                 "rpm": "rpm", "steering": "str", "lat_accel": "latg",
+                 "long_accel": "lngg", "yaw_rate": "yaw", "abs": "abs"}
         header = ["dist%", "t"]
         for name in resolved:
             header.append(f"{short.get(name, name)}L")
             header.append(f"{short.get(name, name)}R")
+        if want_line:
+            header.append("lineM")
         header.append("\u0394s")
 
         rows = []
@@ -1229,6 +1247,9 @@ async def get_channel_window(
                 ref_values = reference.channel(name)
                 row.append(f"{convert(lap_values[i]):.{digits}f}" if lap_values else "-")
                 row.append(f"{convert(ref_values[i]):.{digits}f}" if ref_values else "-")
+            if want_line:
+                line = comparison.line_offset
+                row.append(f"{line[i]:+.1f}" if i < len(line) else "-")
             trace = comparison.delta_trace
             row.append(
                 f"{trace[i] - trace[start_idx]:+.3f}"
@@ -1244,7 +1265,7 @@ async def get_channel_window(
             "",
             f"```\n{fixed_table(header, rows)}\n```",
             "",
-            "_spd=speed km/h, thr=throttle %, brk=brake %, gr=gear, str=steering deg (+right), latg/lngg=accel m/s2. "
+            "_spd=speed km/h, thr=throttle %, brk=brake %, gr=gear, str=steering deg, latg/lngg=accel m/s2, yaw=yaw rate deg/s, abs=ABS active 0/1, lineM=metres left(+)/right(-) of the reference line. "
             "`t` = seconds elapsed on this lap since the window start; the "
             "reference lap's elapsed time is `t − \u0394s`. `\u0394s` = cumulative gap "
             "since the window start, + means this lap is slower._",
@@ -1293,6 +1314,231 @@ async def get_channel_window(
     except Exception as e:
         logger.error(f"get_channel_window failed: {e}", exc_info=True)
         return _err(f"Channel window failed: {e}")
+
+
+
+
+async def analyze_corner(
+    car: str,
+    track: str,
+    corner_number: int,
+    all_laps: bool = False,
+    max_laps: int = 8,
+) -> list[TextContent]:
+    """Everything measured about one corner: both laps in detail, or the whole
+    stint's spread through it when all_laps is set."""
+    try:
+        import math as _math
+
+        def deg(v, spec="{:.1f}"):
+            return spec.format(_math.degrees(v)) if v is not None else "-"
+
+        def num(v, spec="{:.2f}"):
+            return spec.format(v) if v is not None else "-"
+
+        entry = _require_comparison(car, track)
+        comparison = entry["comparison"]
+        match = next(
+            (c for c in comparison.corners if c.corner.number == corner_number), None
+        )
+        if match is None:
+            available = ", ".join(str(c.corner.number) for c in comparison.corners) or "none"
+            return _err(
+                f"No Turn {corner_number} in the loaded comparison. Available: {available}."
+            )
+        corner = match.corner
+
+        apex_gps = ""
+        ref_lap_t = comparison.reference
+        if ref_lap_t is not None:
+            glat, glon = ref_lap_t.channel("lat"), ref_lap_t.channel("lon")
+            if glat and glon:
+                gi = int(round(corner.apex_pct * (len(glat) - 1)))
+                # For the caller to attach a real-world corner name if it wants
+                # one; the server only numbers corners.
+                apex_gps = f" Apex GPS {glat[gi]:.5f}, {glon[gi]:.5f}."
+
+        lines = [
+            f"## {corner.name} — {corner.apex_pct * 100:.1f}% apex, "
+            f"extent {corner.start_pct * 100:.1f}–{corner.end_pct * 100:.1f}%",
+            "",
+            f"{corner.kind} corner, {corner.direction}, "
+            f"{abs(corner.turn_angle):.0f}° heading change, "
+            f"detected on {corner.support:.0%} of sampled laps.{apex_gps}",
+            "",
+        ]
+
+        if not all_laps:
+            d, r = match.dynamics, match.ref_dynamics
+            lines.append(f"**{entry['lap_name']}** (L) vs **{entry['reference_name']}** (R), "
+                         f"Δ {match.time_delta:+.3f}s in this corner.")
+            lines.append("")
+            ev_rows = []
+            for label, dyn in (("L", d), ("R", r)):
+                if dyn is None:
+                    continue
+                ev_rows.append([
+                    label,
+                    num(dyn.ev_brake_release_pct and dyn.ev_brake_release_pct * 100),
+                    num(dyn.ev_steer_peak_pct and dyn.ev_steer_peak_pct * 100),
+                    num(dyn.ev_yaw_peak_pct and dyn.ev_yaw_peak_pct * 100),
+                    num(dyn.ev_min_speed_pct and dyn.ev_min_speed_pct * 100),
+                    num(dyn.ev_throttle_pct and dyn.ev_throttle_pct * 100),
+                    num(dyn.event_spread_m, "{:.0f}"),
+                ])
+            if ev_rows:
+                lines.append("### Rotation events (lap-distance % of each)")
+                lines.append("")
+                lines.append("```\n" + fixed_table(
+                    ["lap", "brkRel", "stPeak", "yawPeak", "minSpd", "thr1", "spread_m"],
+                    ev_rows) + "\n```")
+                lines.append(
+                    "_Where brake release, peak steering, peak yaw rate, minimum "
+                    "speed and first throttle each fall; spread is the metres "
+                    "covering all five._"
+                )
+                lines.append("")
+
+            det_rows = []
+            for label, dyn, brake_ev, line_a in (
+                ("L", d, match.brake, match.line_apex_m),
+                ("R", r, match.ref_brake, None),
+            ):
+                if dyn is None:
+                    continue
+                det_rows.append([
+                    label,
+                    num(dyn.turn_in_pct and dyn.turn_in_pct * 100),
+                    deg(dyn.steer_peak_rad), num(dyn.steer_mid_ratio),
+                    deg(dyn.reversal_rad), num(dyn.reversal_s),
+                    num(dyn.coupling),
+                    num(dyn.brake_at_turn_in and dyn.brake_at_turn_in * 100, "{:.0f}"),
+                    deg(dyn.steer_at_release_rad),
+                    num(brake_ev.peak_pressure * 100 if brake_ev else None, "{:.0f}"),
+                    num(brake_ev.time_to_peak_s if brake_ev else None),
+                    num(brake_ev.release_s if brake_ev else None),
+                    num(dyn.thr_t50_s), num(dyn.thr_t100_s),
+                    str(dyn.thr_dips), num(dyn.partial_hold_s),
+                    deg(dyn.yaw_peak_rate) if dyn.yaw_peak_rate is not None else "-",
+                    num(dyn.abs_fraction * 100, "{:.0f}"),
+                ])
+            lines.append("### Input shapes")
+            lines.append("")
+            lines.append("```\n" + fixed_table(
+                ["lap", "tIn%", "pkSt", "mid", "rev", "rev_s", "cpl", "b@tI%",
+                 "s@rl", "pb%", "topk", "trail", "t50", "t100", "dips", "hold",
+                 "yawPk", "abs%"],
+                det_rows) + "\n```")
+            lines.append(
+                "_tIn first sustained steering; pkSt peak steering deg; mid build "
+                "shape (1 linear, <1 progressive); rev largest drop in steering "
+                "toward the corner (countersteer included) and its duration; cpl "
+                "share of brake release with steering present; b@tI brake % at "
+                "turn-in; s@rl steering deg at release; pb peak brake; topk/trail "
+                "pedal rise/bleed seconds; t50/t100 seconds to 50/100% throttle; "
+                "dips re-lifts; hold seconds at partial throttle with steering "
+                "loaded and no acceleration; yawPk peak yaw rate deg/s; abs% of "
+                "corner with ABS active._"
+            )
+            if match.line_entry_m is not None:
+                lines.append("")
+                lines.append(
+                    f"**Line vs reference**: entry {match.line_entry_m:+.1f} m, "
+                    f"apex {match.line_apex_m:+.1f} m, exit {match.line_exit_m:+.1f} m "
+                    "(+ = left of the reference's direction of travel)."
+                )
+            flags = (d.flags if d else []) + [f"(ref) {f}" for f in (r.flags if r else [])]
+            if flags:
+                lines.append("")
+                lines.append("**Flagged**: " + " | ".join(flags))
+            lines.append("")
+            lines.append(
+                f"_Raw traces: `get_channel_window` with corner_number={corner_number}._"
+            )
+            return _ok("\n".join(lines))
+
+        # ---- stint mode: this corner across every representative lap ----
+        client = create_client()
+        result = await client.get_my_laps(car, track)
+        usable, excluded = split_usable(result["laps"])
+        chosen = usable[-max_laps:]
+        best = min(usable, key=lambda lap: lap.lapTime)
+        if best.id not in {lap.id for lap in chosen}:
+            chosen = [best] + chosen[-(max_laps - 1):]
+
+        from telemetry import (
+            detect_brake_events, assign_brakes_to_corners,
+            compute_corner_dynamics, estimate_track_length,
+        )
+        rows = []
+        tin_vals, pb_vals, min_vals, rev_vals = [], [], [], []
+        for lap_rec in chosen:
+            csv_data = await client.get_lap_telemetry_csv(lap_rec.id)
+            if not csv_data:
+                continue
+            telem = parse_lap_csv(csv_data, lap_rec.lapTime, lap_rec.startTime[:10])
+            length = estimate_track_length(telem)
+            brake_map = assign_brakes_to_corners(
+                detect_brake_events(telem, track_length_m=length), [corner]
+            )
+            dyn = compute_corner_dynamics(telem, corner, brake_map.get(corner.number), length)
+            last = len(telem.distance) - 1
+            lo = max(0, min(last, int(round(corner.start_pct * last))))
+            hi = max(0, min(last, int(round(corner.end_pct * last))))
+            min_spd = min(telem.speed[lo:hi + 1]) * MS_TO_KMH if telem.speed else None
+            pb = brake_map.get(corner.number)
+            if dyn.turn_in_pct is not None:
+                tin_vals.append(dyn.turn_in_pct * 100)
+            if pb:
+                pb_vals.append(pb.peak_pressure * 100)
+            if min_spd is not None:
+                min_vals.append(min_spd)
+            rev_vals.append(_math.degrees(dyn.reversal_rad))
+            rows.append([
+                lap_rec.startTime[5:16].replace("T", " "),
+                format_lap_time(lap_rec.lapTime) + (" *" if lap_rec.id == best.id else ""),
+                num(dyn.turn_in_pct and dyn.turn_in_pct * 100),
+                num(pb.peak_pressure * 100 if pb else None, "{:.0f}"),
+                num(pb.release_s if pb else None),
+                num(dyn.coupling),
+                num(min_spd, "{:.0f}"),
+                deg(dyn.reversal_rad, "{:.0f}"),
+                num(dyn.thr_t100_s),
+                num(dyn.partial_hold_s),
+                ";".join(dyn.flags) if dyn.flags else "-",
+            ])
+
+        lines.append(f"### {corner.name} across {len(rows)} laps "
+                     f"({len(excluded)} compromised laps excluded, * = personal best)")
+        lines.append("")
+        lines.append("```\n" + fixed_table(
+            ["lap", "time", "tIn%", "pb%", "trail", "cpl", "minSpd", "rev", "t100", "hold", "flags"],
+            rows) + "\n```")
+
+        def spread(vals):
+            if len(vals) < 2:
+                return "n/a"
+            mean = statistics.mean(vals)
+            return f"spread {max(vals) - min(vals):.2f}, sd {statistics.pstdev(vals):.2f}, mean {mean:.2f}"
+
+        lines.append("")
+        lines.append(
+            f"**Variation**: turn-in {spread(tin_vals)} (pct-points) · "
+            f"peak brake {spread(pb_vals)} (%) · min speed {spread(min_vals)} (km/h) · "
+            f"reversal {spread(rev_vals)} (deg)."
+        )
+        lines.append("")
+        lines.append(
+            "_Same measurement definitions as the single-corner view; laps in "
+            "session order._"
+        )
+        return _ok("\n".join(lines))
+
+    except ValueError as e:
+        return _err(str(e))
+    except Exception as e:
+        logger.error(f"analyze_corner failed: {e}", exc_info=True)
+        return _err(f"Corner analysis failed: {e}")
 
 
 async def analyze_worst_sections(car: str, track: str) -> list[TextContent]:
@@ -1856,6 +2102,45 @@ ANALYZE_CONSISTENCY_TOOL = Tool(
     },
 )
 
+ANALYZE_CORNER_TOOL = Tool(
+    name="analyze_corner",
+    description=(
+        "Everything measured about ONE corner. Default: both laps of the most "
+        "recent comparison in full detail — rotation-event positions (brake "
+        "release, peak steering, peak yaw rate, min speed, first throttle) and "
+        "their convergence, steering shape (turn-in, peak, build ratio, largest "
+        "reversal), brake/steering overlap, pedal shape, throttle ramp, line "
+        "offset vs the reference, and ABS. With all_laps=true: the same corner "
+        "across every representative lap in the stint, with the spread of "
+        "turn-in, peak pressure, min speed and correction size — use this to "
+        "find WHERE inconsistency lives when sector-level numbers are too "
+        "coarse. Run a comparison tool first."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "car": {"type": "string", "description": _CAR_DESC},
+            "track": {"type": "string", "description": _TRACK_DESC},
+            "corner_number": {
+                "type": "number",
+                "description": "Turn number from the comparison output",
+            },
+            "all_laps": {
+                "type": "boolean",
+                "description": (
+                    "Analyse this corner across the whole stint instead of the "
+                    "two compared laps"
+                ),
+            },
+            "max_laps": {
+                "type": "number",
+                "description": "Stint mode: how many recent laps to include (default 8)",
+            },
+        },
+        "required": ["car", "track", "corner_number"],
+    },
+)
+
 GET_CHANNEL_WINDOW_TOOL = Tool(
     name="get_channel_window",
     description=(
@@ -1895,7 +2180,7 @@ GET_CHANNEL_WINDOW_TOOL = Tool(
                 "items": {"type": "string"},
                 "description": (
                     "Channels to return. Any of: speed, throttle, brake, gear, "
-                    "rpm, steering, lat_accel, long_accel — or 'all' for every "
+                    "rpm, steering, lat_accel, long_accel, yaw_rate, abs, line — or 'all' for every "
                     "channel at once. Defaults to speed, brake, throttle."
                 ),
             },
@@ -1922,5 +2207,6 @@ ALL_TOOLS = [
     ANALYZE_WORST_SECTIONS_TOOL,
     ANALYZE_TELEMETRY_RANGE_TOOL,
     ANALYZE_TELEMETRY_SECTOR_TOOL,
+    ANALYZE_CORNER_TOOL,
     GET_CHANNEL_WINDOW_TOOL,
 ]

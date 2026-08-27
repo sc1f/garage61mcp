@@ -11,6 +11,7 @@ from api_client import initialize_cache
 from tools import (
     ALL_TOOLS,
     analyze_consistency,
+    analyze_corner,
     analyze_telemetry_range,
     analyze_telemetry_sector,
     analyze_worst_sections,
@@ -87,6 +88,15 @@ async def _dispatch(name: str, arguments: dict) -> list[TextContent]:
 
     if name == "analyze_consistency":
         return await analyze_consistency(car, track)
+
+    if name == "analyze_corner":
+        return await analyze_corner(
+            car,
+            track,
+            int(arguments.get("corner_number", 0)),
+            bool(arguments.get("all_laps", False)),
+            max(2, min(12, int(arguments.get("max_laps", 8)))),
+        )
 
     if name == "get_channel_window":
         corner_number = arguments.get("corner_number")

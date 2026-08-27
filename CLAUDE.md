@@ -31,8 +31,12 @@ Garage61 API. It lets Claude fetch lap times and telemetry, and — the main poi
 11. **`analyze_worst_sections`** — corners ranked by time lost
 12. **`analyze_telemetry_sector`** / **`analyze_telemetry_range`** — summary of
     one sector or an arbitrary distance range
-13. **`get_channel_window`** — raw aligned channel values for both laps across a
-    range, as numbers
+13. **`analyze_corner`** — one corner in full: rotation-event convergence,
+    steering shape, brake/steering overlap, throttle ramp, line offset, ABS;
+    `all_laps=true` runs the same corner across the whole stint with spreads
+14. **`get_channel_window`** — raw aligned channel values for both laps across a
+    range (speed, throttle, brake, gear, rpm, steering, lat/long accel,
+    yaw_rate, abs, line offset), as numbers
 
 ## Division of labour: server computes, caller reasons
 
@@ -119,6 +123,30 @@ spends about a third of each row on pipes; `formatting.fixed_table` spends it on
 data. Uniform-grid series (`uniform_series`) state spacing once instead of
 printing a position next to every value — same characters, twice the
 resolution. Keep Markdown tables for small human-facing summaries only.
+
+**Corner dynamics are defined measurements, not judgements.** Every metric in
+`CornerDynamics` (coupling, build ratio, reversal, partial-hold, event spread)
+has a one-line definition that ships in the output legend, and flags name their
+condition ("brake released before turn-in"), never a verdict. The reversal
+measure includes countersteer by design, so it can exceed peak steering — that
+is signal, not a bug. Whether a shape is right for a given car is the caller's
+call; keep it that way.
+
+**Corner names are the caller's job.** The server numbers corners (stable via
+the consensus map) and exposes the apex GPS in `analyze_corner`; attaching
+human names to them is semantics and lives with the caller. A curated name
+table was built and deliberately removed — don't reintroduce it.
+
+**The line offset needs both laps' GPS.** `line_offset_series` projects the
+position delta onto the reference tangent's normal (equirectangular metres), so
+longitudinal misalignment doesn't contaminate the lateral figure. Positive =
+left of the reference's direction of travel; the sign convention is stated in
+every output that carries it.
+
+**Conditions print with every comparison**, not only when they differ. Fuel and
+track temperature are never normalised away — inventing a per-car correction
+coefficient would be heuristic cause-finding; showing both laps' conditions next
+to the delta is the honest version.
 
 **Each braking event belongs to exactly one corner**
 (`assign_brakes_to_corners`). A loose per-corner match made linked corners
