@@ -96,7 +96,7 @@ async def _dispatch(name: str, arguments: dict) -> list[TextContent]:
             arguments.get("start_pct", 0),
             arguments.get("end_pct", 100),
             arguments.get("channels"),
-            int(arguments.get("points", 40)),
+            int(arguments.get("points", 60)),
             int(corner_number) if corner_number is not None else None,
         )
 

@@ -108,7 +108,7 @@ class Garage61Client:
     
     async def get_cars(self) -> List[Dict[str, Any]]:
         """Fetch available cars."""
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             try:
                 logger.debug(f"Fetching cars from {self.base_url}/cars")
                 response = await client.get(
@@ -137,7 +137,7 @@ class Garage61Client:
     
     async def get_tracks(self) -> List[Dict[str, Any]]:
         """Fetch available tracks."""
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             try:
                 logger.debug(f"Fetching tracks from {self.base_url}/tracks")
                 response = await client.get(
@@ -337,7 +337,7 @@ class Garage61Client:
 
     async def get_laps(self, car_ids: List[int], track_ids: List[int], limit: int = 50, try_telemetry: bool = True) -> List[LapData]:
         """Fetch laps for specific car and track IDs. Tries with telemetry first, falls back without on 403."""
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             # First try with telemetry if requested
             if try_telemetry:
                 try:
@@ -410,7 +410,7 @@ class Garage61Client:
     
     async def get_lap_telemetry_csv(self, lap_id: str) -> Optional[str]:
         """Fetch telemetry data for a specific lap as CSV. Returns None if Pro plan required."""
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             try:
                 logger.debug(f"Attempting to fetch telemetry for lap {lap_id}")
                 response = await client.get(
@@ -579,7 +579,7 @@ class Garage61Client:
         logger.debug(f"Found track ID: {track_id}")
         
         # Get laps for current user only
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             # Try with telemetry first, then without if 403
             for try_telemetry in [True, False]:
                 try:
@@ -683,7 +683,7 @@ class Garage61Client:
                 raise ValueError(f"Track '{track_name}' not found. Use the list_tracks tool to see all available tracks with variants.")
         
         # Get laps from all accessible drivers (me + teams)
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             # Try with telemetry first, then without if 403
             for try_telemetry in [True, False]:
                 try:

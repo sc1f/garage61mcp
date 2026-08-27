@@ -12,6 +12,8 @@ from cache import get_cache
 from formatting import (
     MS_TO_KMH,
     comparison_report,
+    fixed_table,
+    uniform_series,
     corner_table,
     format_conditions,
     format_gap,
@@ -1054,14 +1056,14 @@ async def analyze_telemetry_range(
 
         cumulative = trace[start_idx:end_idx + 1] if trace else []
         if cumulative:
-            step = max(1, len(cumulative) // 15)
-            marks = []
-            for i in range(0, len(cumulative), step):
-                pct = grid[start_idx + i] * 100
-                marks.append(f"{pct:5.1f}%:{cumulative[i] - cumulative[0]:+.3f}")
+            rebased = [v - cumulative[0] for v in cumulative]
+            thinned = downsample(rebased, 40)
+            series = uniform_series(
+                thinned, grid[start_idx] * 100, grid[end_idx] * 100, fmt="{:+.3f}"
+            )
             lines.append("### Gap accumulating through the range")
             lines.append("")
-            lines.append(f"```\n{'  '.join(marks)}\n```")
+            lines.append(f"```\n{series}\n```")
 
         return _ok("\n".join(lines))
 
@@ -1129,7 +1131,7 @@ async def get_channel_window(
     start_pct: float = 0.0,
     end_pct: float = 100.0,
     channels: Optional[Sequence[str]] = None,
-    points: int = 40,
+    points: int = 60,
     corner_number: Optional[int] = None,
 ) -> list[TextContent]:
     """Return aligned numeric telemetry for a range of the loaded comparison.
@@ -1180,6 +1182,8 @@ async def get_channel_window(
             return _err("That range contains no samples; widen it.")
 
         requested = [c.strip().lower() for c in (channels or ["speed", "brake", "throttle"])]
+        if "all" in requested:
+            requested = list(CHANNEL_ALIASES)
         resolved, unknown = [], []
         for name in requested:
             target = CHANNEL_ALIASES.get(name)
@@ -1193,7 +1197,7 @@ async def get_channel_window(
                 f"{', '.join(sorted(lap.channels))}."
             )
 
-        points = max(5, min(120, points))
+        points = max(5, min(250, points))
         indices = [
             start_idx + int(round(i * (end_idx - start_idx) / (points - 1)))
             for i in range(points)
@@ -1207,50 +1211,44 @@ async def get_channel_window(
         lap_t0 = lap_clock[start_idx] if lap_clock else 0.0
         ref_t0 = ref_clock[start_idx] if ref_clock else 0.0
 
-        header = ["dist%", "t lap", "t ref"]
+        short = {"speed": "spd", "throttle": "thr", "brake": "brk", "gear": "gr",
+                 "rpm": "rpm", "steering": "str", "lat_accel": "latg", "long_accel": "lngg"}
+        header = ["dist%", "t"]
         for name in resolved:
-            unit = CHANNEL_RENDER[name][0]
-            suffix = f" {unit}" if unit else ""
-            header.append(f"{name}{suffix} (lap)")
-            header.append(f"{name}{suffix} (ref)")
-        header.append("delta s")
+            header.append(f"{short.get(name, name)}L")
+            header.append(f"{short.get(name, name)}R")
+        header.append("\u0394s")
 
         rows = []
         for i in indices:
             row = [f"{grid[i] * 100:.2f}"]
-            row.append(f"{lap_clock[i] - lap_t0:.2f}" if lap_clock else "—")
-            row.append(f"{ref_clock[i] - ref_t0:.2f}" if ref_clock else "—")
+            row.append(f"{lap_clock[i] - lap_t0:.2f}" if lap_clock else "-")
             for name in resolved:
                 _, convert, digits = CHANNEL_RENDER[name]
                 lap_values = lap.channel(name)
                 ref_values = reference.channel(name)
-                row.append(f"{convert(lap_values[i]):.{digits}f}" if lap_values else "—")
-                row.append(f"{convert(ref_values[i]):.{digits}f}" if ref_values else "—")
+                row.append(f"{convert(lap_values[i]):.{digits}f}" if lap_values else "-")
+                row.append(f"{convert(ref_values[i]):.{digits}f}" if ref_values else "-")
             trace = comparison.delta_trace
             row.append(
                 f"{trace[i] - trace[start_idx]:+.3f}"
-                if trace and i < len(trace) else "—"
+                if trace and i < len(trace) else "-"
             )
             rows.append(row)
 
         lines = [
             f"## Telemetry {start * 100:.1f}% – {end * 100:.1f}%",
             "",
-            f"**{entry['lap_name']}** (lap) vs **{entry['reference_name']}** (ref), "
+            f"**{entry['lap_name']}** (L) vs **{entry['reference_name']}** (R), "
             f"{len(indices)} samples.",
             "",
-            "| " + " | ".join(header) + " |",
-            "|" + "---|" * len(header),
+            f"```\n{fixed_table(header, rows)}\n```",
+            "",
+            "_spd=speed km/h, thr=throttle %, brk=brake %, gr=gear, str=steering deg (+right), latg/lngg=accel m/s2. "
+            "`t` = seconds elapsed on this lap since the window start; the "
+            "reference lap's elapsed time is `t − \u0394s`. `\u0394s` = cumulative gap "
+            "since the window start, + means this lap is slower._",
         ]
-        lines.extend("| " + " | ".join(row) + " |" for row in rows)
-        lines.append("")
-        lines.append(
-            "_`t lap` / `t ref` are seconds elapsed since the start of this "
-            "window on each lap — use these to read brake duration, how long "
-            "pressure took to build, and how long it was trailed. `delta s` is "
-            "time gained (−) or lost (+) since the window start. Steering is "
-            "degrees, positive to the right._"
-        )
 
         # A per-event summary of the pedal shape, so the caller doesn't have to
         # reconstruct it from the sampled rows.
@@ -1263,27 +1261,23 @@ async def get_channel_window(
                 if e.end_pct >= start and e.start_pct <= end
             ]
             for e in events:
-                brake_lines.append(
-                    f"| {label} | {e.start_pct * 100:.2f}% | {e.peak_pct * 100:.2f}% "
-                    f"| {e.end_pct * 100:.2f}% | {e.peak_pressure * 100:.0f}% "
-                    f"| {e.duration_s:.2f}s | {e.time_to_peak_s:.2f}s "
-                    f"| {e.release_s:.2f}s "
-                    f"| {e.entry_speed * MS_TO_KMH:.0f}→{e.exit_speed * MS_TO_KMH:.0f} km/h |"
-                )
+                brake_lines.append([
+                    label,
+                    f"{e.start_pct * 100:.2f}", f"{e.peak_pct * 100:.2f}",
+                    f"{e.end_pct * 100:.2f}", f"{e.peak_pressure * 100:.0f}",
+                    f"{e.duration_s:.2f}", f"{e.time_to_peak_s:.2f}",
+                    f"{e.release_s:.2f}",
+                    f"{e.entry_speed * MS_TO_KMH:.0f}>{e.exit_speed * MS_TO_KMH:.0f}",
+                ])
         if brake_lines:
             lines.append("")
             lines.append("### Braking applications in this window")
             lines.append("")
+            brake_headers = ["lap", "apply%", "peak%", "rel%", "press%",
+                             "dur_s", "topk_s", "trail_s", "spd km/h"]
+            lines.append(f"```\n{fixed_table(brake_headers, brake_lines)}\n```")
             lines.append(
-                "| Lap | Apply | Peak | Release | Peak press | Duration "
-                "| To peak | Trail | Speed |"
-            )
-            lines.append("|---|---|---|---|---|---|---|---|---|")
-            lines.extend(brake_lines)
-            lines.append("")
-            lines.append(
-                "_`To peak` is how long pressure took to reach maximum; `Trail` "
-                "is how long it was bled off after the peak._"
+                "_topk = time to peak pressure; trail = bleed-off after the peak._"
             )
         if unknown:
             lines.append("")
@@ -1901,13 +1895,13 @@ GET_CHANNEL_WINDOW_TOOL = Tool(
                 "items": {"type": "string"},
                 "description": (
                     "Channels to return. Any of: speed, throttle, brake, gear, "
-                    "rpm, steering, lat_accel, long_accel. "
-                    "Defaults to speed, brake, throttle."
+                    "rpm, steering, lat_accel, long_accel — or 'all' for every "
+                    "channel at once. Defaults to speed, brake, throttle."
                 ),
             },
             "points": {
                 "type": "number",
-                "description": "How many samples to return (5-120, default 40)",
+                "description": "How many samples to return (5-250, default 60)",
             },
         },
         "required": ["car", "track"],

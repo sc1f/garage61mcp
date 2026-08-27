@@ -109,8 +109,21 @@ around the start/finish line. `parse_lap_csv` sorts by distance and merges
 duplicates before interpolating — don't assume ordering.
 
 **Never return raw telemetry CSV from a tool.** A lap is roughly 8,000 rows /
-1.3 MB, which blows past any model's context. Every tool summarises. Keep single
-tool results in the low thousands of characters.
+1.3 MB, which blows past any model's context. Summary tools stay in the low
+thousands of characters; `get_channel_window` is the sanctioned dense path and
+is bounded by its point cap (250) — a maximal request (full lap, all channels,
+both laps) is ~33k chars / ~8k tokens, which is deliberate and opt-in.
+
+**Dense numeric output uses fixed-width blocks, not Markdown tables.** Markdown
+spends about a third of each row on pipes; `formatting.fixed_table` spends it on
+data. Uniform-grid series (`uniform_series`) state spacing once instead of
+printing a position next to every value — same characters, twice the
+resolution. Keep Markdown tables for small human-facing summaries only.
+
+**Each braking event belongs to exactly one corner**
+(`assign_brakes_to_corners`). A loose per-corner match made linked corners
+share one event, so a corner taken flat showed its neighbour's brake shape as
+its own. "No braking here" must stay visible as `-`.
 
 **Track length is derived, not looked up.** `estimate_track_length` inverts
 `lap_time = L * integral(dd/v)` to recover L from the speed trace. It lands

@@ -843,17 +843,30 @@ def _first_crossing(
     return None
 
 
-def _brake_for_corner(
-    events: Sequence[BrakeEvent], corner: Corner
-) -> Optional[BrakeEvent]:
-    """The braking application feeding a corner: the last one ending by the apex."""
-    candidates = [
-        e for e in events
-        if e.start_pct <= corner.apex_pct and e.end_pct >= corner.start_pct - 0.05
-    ]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda e: e.start_pct)
+def assign_brakes_to_corners(
+    events: Sequence[BrakeEvent], corners: Sequence[Corner]
+) -> Dict[int, BrakeEvent]:
+    """Give each braking event to exactly one corner: the first apex it feeds.
+
+    A loose per-corner match made linked corners share one event, so a corner
+    taken flat displayed its neighbour's brake shape as if it were its own.
+    Unique assignment keeps "no braking here" visible as exactly that; where two
+    events feed the same apex (a stab then the real stop), the one ending
+    closest to the apex wins.
+    """
+    out: Dict[int, BrakeEvent] = {}
+    for event in events:
+        target = None
+        for corner in corners:
+            if corner.apex_pct >= event.start_pct:
+                target = corner
+                break
+        if target is None:
+            continue
+        held = out.get(target.number)
+        if held is None or event.end_pct > held.end_pct:
+            out[target.number] = event
+    return out
 
 
 def compare_corners(
@@ -869,6 +882,8 @@ def compare_corners(
 
     lap_brakes = detect_brake_events(lap, track_length_m=track_length_m)
     ref_brakes = detect_brake_events(reference, track_length_m=track_length_m)
+    lap_brake_map = assign_brakes_to_corners(lap_brakes, corners)
+    ref_brake_map = assign_brakes_to_corners(ref_brakes, corners)
 
     for corner in corners:
         start_idx = _index_for(lap.distance, corner.start_pct)
@@ -929,8 +944,8 @@ def compare_corners(
                 ),
                 apex_gear=int(round(apex_gear)) if apex_gear is not None else None,
                 ref_apex_gear=int(round(ref_apex_gear)) if ref_apex_gear is not None else None,
-                brake=_brake_for_corner(lap_brakes, corner),
-                ref_brake=_brake_for_corner(ref_brakes, corner),
+                brake=lap_brake_map.get(corner.number),
+                ref_brake=ref_brake_map.get(corner.number),
             )
         )
 
