@@ -78,6 +78,8 @@ Multi-tenancy rules that must not regress:
 - Lap lists get a 60s TTL cache (`_lap_list_cache`) — they must refresh as new
   laps appear, but within one conversation every tool otherwise refetches the
   same list. A 7-tool analysis conversation costs 6 API requests total.
+- Never bake a token into the HTTP image or read the env token on the HTTP
+  path for a request that carried none.
 
 Rate limiting (per https://garage61.net/developer/rate-limits): the API is a
 continuously refilling token bucket per (application, user, operation); exact
@@ -88,8 +90,6 @@ fails fast with the wait time for longer ones; and records the block so
 subsequent calls to that operation fail immediately client-side instead of
 sending more requests ("pause the affected operation" per the docs). Never
 bypass `_api_get` for a Garage61 call.
-- Never bake a token into the HTTP image or read the env token on the HTTP
-  path for a request that carried none.
 
 `Dockerfile` runs the HTTP entry point; no secrets in the image.
 
