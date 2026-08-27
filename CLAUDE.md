@@ -72,6 +72,11 @@ Multi-tenancy rules that must not regress:
   geometry, identical for everyone, and sharing saves telemetry downloads.
 - The cars/tracks cache fills lazily on the HTTP path (`ensure_cache`), since
   no token exists at process startup.
+- The telemetry CSV cache (`api_client._telemetry_csv_cache`) is keyed per
+  (user, lap): laps are immutable so caching is safe, but serving user B a CSV
+  fetched with user A's token would bypass Garage61's authorization. Repeat
+  downloads were the bulk of our API traffic and were tripping Garage61's rate
+  limit (429s carry `retryAfterSeconds`, which the error messages surface).
 - Never bake a token into the HTTP image or read the env token on the HTTP
   path for a request that carried none.
 

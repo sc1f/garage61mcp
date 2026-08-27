@@ -6,6 +6,7 @@ import logging
 from typing import Any, Dict, List, Optional
 import httpx
 from pydantic import BaseModel
+from collections import OrderedDict
 from cache import get_cache
 
 # Set up logging
@@ -92,6 +93,28 @@ class TelemetryData(BaseModel):
     speed: TelemetryChannel
     throttle: TelemetryChannel
     brake: TelemetryChannel
+
+
+
+def _rate_limit_message(response) -> str:
+    """A 429 the caller can act on: say when to retry, not just that we failed."""
+    retry_s = None
+    try:
+        retry_s = response.json().get("details", {}).get("retryAfterSeconds")
+    except Exception:
+        pass
+    retry_s = retry_s or response.headers.get("Retry-After")
+    suffix = f" Retry in about {retry_s} seconds." if retry_s else " Retry shortly."
+    return "Garage61 rate limit reached." + suffix
+
+
+# Lap telemetry is immutable once recorded, which makes it ideal cache
+# material: comparisons, corner maps and stint views repeatedly re-fetch the
+# same lap CSVs, and each is ~1.3 MB of Garage61 API traffic. Keyed per user
+# deliberately -- serving user B a CSV fetched with user A's token would bypass
+# Garage61's authorization. Bounded LRU; ~50 MB at the cap.
+_TELEMETRY_CACHE_MAX = 40
+_telemetry_csv_cache: "OrderedDict[tuple, Optional[str]]" = OrderedDict()
 
 
 class Garage61Client:
@@ -285,6 +308,8 @@ class Garage61Client:
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 401:
                     raise ValueError("Invalid authentication token")
+                if e.response.status_code == 429:
+                    raise ValueError(_rate_limit_message(e.response))
                 raise ValueError(f"API error: {e.response.status_code} - {e.response.text}")
             except httpx.RequestError as e:
                 raise ValueError(f"Network error: {str(e)}")
@@ -322,6 +347,8 @@ class Garage61Client:
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 401:
                     raise ValueError("Invalid authentication token")
+                if e.response.status_code == 429:
+                    raise ValueError(_rate_limit_message(e.response))
                 raise ValueError(f"API error: {e.response.status_code} - {e.response.text}")
             except httpx.RequestError as e:
                 raise ValueError(f"Network error: {str(e)}")
@@ -409,7 +436,17 @@ class Garage61Client:
                 raise ValueError(f"Network error: {str(e)}")
     
     async def get_lap_telemetry_csv(self, lap_id: str) -> Optional[str]:
-        """Fetch telemetry data for a specific lap as CSV. Returns None if Pro plan required."""
+        """Fetch telemetry data for a specific lap as CSV. Returns None if Pro plan required.
+
+        Cached per (user, lap): laps are immutable, and re-downloads were the
+        bulk of our Garage61 API traffic (rate limits were being hit).
+        """
+        from reqcontext import user_scope
+        cache_key = (user_scope(), lap_id)
+        if cache_key in _telemetry_csv_cache:
+            _telemetry_csv_cache.move_to_end(cache_key)
+            return _telemetry_csv_cache[cache_key]
+
         async with httpx.AsyncClient(timeout=30) as client:
             try:
                 logger.debug(f"Attempting to fetch telemetry for lap {lap_id}")
@@ -420,6 +457,9 @@ class Garage61Client:
                 response.raise_for_status()
                 
                 logger.debug(f"Successfully fetched telemetry for lap {lap_id}")
+                _telemetry_csv_cache[cache_key] = response.text
+                while len(_telemetry_csv_cache) > _TELEMETRY_CACHE_MAX:
+                    _telemetry_csv_cache.popitem(last=False)
                 return response.text
                 
             except httpx.HTTPStatusError as e:
@@ -431,6 +471,8 @@ class Garage61Client:
                     return None
                 elif e.response.status_code == 401:
                     raise ValueError("Invalid authentication token")
+                elif e.response.status_code == 429:
+                    raise ValueError(_rate_limit_message(e.response))
                 else:
                     raise ValueError(f"API error: {e.response.status_code} - {e.response.text}")
             except httpx.RequestError as e:
