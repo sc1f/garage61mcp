@@ -116,9 +116,10 @@ random tokens cannot amplify into Garage61 `/me` traffic — cached tokens are
 unaffected; and setting `GARAGE61_MCP_ACCESS_KEY` requires every request to
 carry `X-MCP-Access-Key` (constant-time compare), making the endpoint
 effectively private. `/healthz` stays open for load-balancer checks and
-returns nothing but `{"status":"ok"}`. On App Runner, cap auto-scaling at max
-1 instance: App Runner bills instance-hours, not requests, so the instance cap
-is the actual bill ceiling (~$15/mo flat-out vs ~$3-5 idle).
+returns nothing but `{"status":"ok"}`. On Lambda the bill scales with
+invocations rather than instance-hours, so the access key is the practical
+spend control: a stranger without it is rejected before any Garage61 call.
+Set a reserved-concurrency cap if a hard ceiling is ever wanted.
 
 ## Setup
 1. Get a Garage61 API token from https://garage61.net
