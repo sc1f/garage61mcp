@@ -26,7 +26,7 @@ $PY -m pip install -q --target "$WORK/pkg" \
 cp -r "$ROOT/src" "$WORK/pkg/garage61_mcp"
 cat > "$WORK/pkg/run.sh" <<'RUN'
 #!/bin/bash
-exec python -m uvicorn garage61_mcp.http_server:app --host 0.0.0.0 --port 8080
+exec python -m uvicorn garage61_mcp.http_server:app --host 0.0.0.0 --port 8080 --no-access-log
 RUN
 chmod +x "$WORK/pkg/run.sh"
 ( cd "$WORK/pkg" && find . -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null; zip -qr ../fn.zip . )

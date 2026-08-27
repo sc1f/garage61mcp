@@ -12,6 +12,11 @@ Environment:
     GARAGE61_MCP_ACCESS_KEY         if set, every request must also carry it as
                                     X-MCP-Access-Key -- makes the endpoint
                                     effectively private (strangers cost nothing)
+
+Credentials normally travel as headers. They are ALSO accepted as query
+parameters (?key=...&token=...) because claude.ai connectors -- which is what
+the Claude mobile app uses -- cannot send custom headers. When serving that
+path, never log query strings.
     GARAGE61_LOG_LEVEL              WARNING by default
 """
 
@@ -30,6 +35,8 @@ import httpx
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+from urllib.parse import parse_qs
+
 from starlette.routing import Route
 
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
@@ -128,13 +135,16 @@ class BearerAuthMiddleware:
             return
 
         headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+        query = parse_qs(scope.get("query_string", b"").decode())
 
         # Optional private mode: with an access key configured, requests
         # without it are rejected before any work happens. Constant-time
-        # comparison; the key is a gate, not a user identity.
+        # comparison; the key is a gate, not a user identity. The query-param
+        # form exists for claude.ai connectors (mobile), which cannot send
+        # custom headers.
         access_key = os.getenv("GARAGE61_MCP_ACCESS_KEY", "")
         if access_key:
-            supplied = headers.get("x-mcp-access-key", "")
+            supplied = headers.get("x-mcp-access-key", "") or (query.get("key") or [""])[0]
             if not hmac.compare_digest(supplied, access_key):
                 response = _unauthorized("Missing or invalid X-MCP-Access-Key.")
                 await response(scope, receive, send)
@@ -153,6 +163,9 @@ class BearerAuthMiddleware:
             return
 
         auth = headers.get("authorization", "")
+        query_token = (query.get("token") or [""])[0].strip()
+        if query_token and not auth:
+            auth = f"Bearer {query_token}"
         if not auth.lower().startswith("bearer ") or not auth[7:].strip():
             response = _unauthorized(
                 "Provide your Garage61 personal access token as "
