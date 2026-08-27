@@ -123,11 +123,14 @@ thousands of characters; `get_channel_window` is the sanctioned dense path and
 is bounded by its point cap (250) — a maximal request (full lap, all channels,
 both laps) is ~33k chars / ~8k tokens, which is deliberate and opt-in.
 
-**Dense numeric output uses fixed-width blocks, not Markdown tables.** Markdown
-spends about a third of each row on pipes; `formatting.fixed_table` spends it on
-data. Uniform-grid series (`uniform_series`) state spacing once instead of
-printing a position next to every value — same characters, twice the
-resolution. Keep Markdown tables for small human-facing summaries only.
+**Output is model-first, not renderer-first.** Every table is a fixed-width
+block in a code fence (`formatting.fixed_table`); Markdown spends about a third
+of each row on pipes. Uniform-grid series (`uniform_series`) state spacing once
+instead of printing a position next to every value — same characters, twice the
+resolution. Bold is stripped wholesale at the output boundary in `_ok()` so the
+builder code stays readable; don't re-add emphasis or emoji. What stays, stays
+for the model: `##` headers give addressable structure, fences mark verbatim
+columns, and the `_…_` legends carry the metric definitions.
 
 **Corner dynamics are defined measurements, not judgements.** Every metric in
 `CornerDynamics` (coupling, build ratio, reversal, partial-hold, event spread)

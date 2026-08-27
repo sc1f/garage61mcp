@@ -108,11 +108,14 @@ async def _get_corner_map(
 
 
 def _err(message: str) -> list[TextContent]:
-    return [TextContent(type="text", text=f"**Error**: {message}")]
+    return [TextContent(type="text", text=f"Error: {message}")]
 
 
 def _ok(message: str) -> list[TextContent]:
-    return [TextContent(type="text", text=message)]
+    # The consumer is a model, not a renderer: bold markers are four characters
+    # of noise per emphasis. Structure (headers, fences, legends) stays; the
+    # cosmetics go here, at the boundary, so the builders stay readable.
+    return [TextContent(type="text", text=message.replace("**", ""))]
 
 
 # --------------------------------------------------------------------------
@@ -219,35 +222,38 @@ async def list_my_laps(car: str, track: str, clean_only: bool = False) -> list[T
             f"Personal best **{format_lap_time(best.lapTime)}** "
             f"({best.startTime[:10]}).",
             "",
-            "| # | Date | Lap time | Gap to PB | Sectors | Telemetry | Conditions |",
-            "|---|---|---|---|---|---|---|",
         ]
 
+        rows = []
         for index, lap in enumerate(laps, start=1):
             sectors = (
-                " / ".join(f"{t:.2f}" for t in lap.sector_times)
-                if lap.sector_times else "—"
+                "/".join(f"{t:.2f}" for t in lap.sector_times)
+                if lap.sector_times else "-"
             )
             gap = lap.lapTime - best.lapTime
             if lap.id == best.id:
-                marker = " 🏆"
+                marker = " *"
             elif lap.id in excluded_ids:
-                marker = " ⚠️"
+                marker = " !"
             else:
                 marker = ""
-            lines.append(
-                f"| {index} | {lap.startTime[:16].replace('T', ' ')} "
-                f"| **{format_lap_time(lap.lapTime)}**{marker} "
-                f"| {format_gap(gap) if gap else '—'} "
-                f"| {sectors} "
-                f"| {'yes' if lap.canViewTelemetry else 'no'} "
-                f"| {format_conditions(lap)} |"
-            )
-
+            rows.append([
+                str(index),
+                lap.startTime[:16].replace("T", " "),
+                format_lap_time(lap.lapTime) + marker,
+                format_gap(gap) if gap else "-",
+                sectors,
+                "y" if lap.canViewTelemetry else "n",
+                format_conditions(lap),
+            ])
+        lines.append("```\n" + fixed_table(
+            ["#", "date", "time", "gapPB", "sectors", "tel", "conditions"], rows
+        ) + "\n```")
+        lines.append("_* = personal best, ! = compromised (excluded from comparisons)._")
         lines.append("")
 
         if excluded:
-            lines.append("**⚠️ Compromised laps (excluded from comparisons):**")
+            lines.append("**Compromised laps (excluded from comparisons):**")
             lines.append("")
             for lap, verdict in excluded:
                 position = laps.index(lap) + 1
@@ -358,7 +364,7 @@ async def compare_my_laps(
             if abs(fuel) >= 5.0:
                 conditions.append(f"fuel load differs by {fuel:+.1f}L")
         if conditions:
-            notes.append(f"⚠️ **Caveat**: {'; '.join(conditions)}.")
+            notes.append(f"**Caveat**: {'; '.join(conditions)}.")
 
         report = comparison_report(
             comparison,
@@ -588,25 +594,26 @@ async def list_drivers(car: str, track: str) -> list[TextContent]:
             f"**{len(laps)} drivers** with laps you can access "
             f"(you and your {len(me.get('teams', []))} team(s)).",
             "",
-            "| # | Driver | Best lap | Gap to you | Telemetry | Set |",
-            "|---|---|---|---|---|---|",
         ]
 
+        rows = []
         for position, lap in enumerate(laps, start=1):
             is_me = _driver_slug(lap) == my_slug
             gap = (
                 lap.lapTime - mine.lapTime
                 if mine and not is_me else None
             )
-            lines.append(
-                f"| {position} "
-                f"| {_driver_name(lap)}{' **(you)**' if is_me else ''} "
-                f"| **{format_lap_time(lap.lapTime)}** "
-                f"| {format_gap(gap) if gap is not None else '—'} "
-                f"| {'yes' if lap.canViewTelemetry else 'no'} "
-                f"| {lap.startTime[:10]} |"
-            )
-
+            rows.append([
+                str(position),
+                _driver_name(lap) + (" (you)" if is_me else ""),
+                format_lap_time(lap.lapTime),
+                format_gap(gap) if gap is not None else "-",
+                "y" if lap.canViewTelemetry else "n",
+                lap.startTime[:10],
+            ])
+        lines.append("```\n" + fixed_table(
+            ["#", "driver", "best", "gap", "tel", "set"], rows
+        ) + "\n```")
         lines.append("")
         if mine:
             faster = [lap for lap in laps if lap.lapTime < mine.lapTime]
@@ -616,7 +623,7 @@ async def list_drivers(car: str, track: str) -> list[TextContent]:
                     f", {len(faster)} driver(s) ahead. Closest is "
                     f"**{_driver_name(faster[-1])}** at "
                     f"{format_gap(faster[-1].lapTime - mine.lapTime)}."
-                    if faster else " — you're quickest here. 🏆"
+                    if faster else " — you're quickest here. *"
                 )
             )
         else:
@@ -739,7 +746,7 @@ async def compare_to_driver(car: str, track: str, driver: str) -> list[TextConte
                     f"track temperature differs by {drift:+.1f}°C, which affects grip"
                 )
         if conditions:
-            notes.append(f"⚠️ **Caveat**: {'; '.join(conditions)}.")
+            notes.append(f"**Caveat**: {'; '.join(conditions)}.")
 
         ranked = sorted(laps, key=lambda lap: lap.lapTime)
         seen: List[str] = []
@@ -857,7 +864,7 @@ async def get_team_fastest_lap(car: str, track: str) -> list[TextContent]:
 
         header = (
             f"## Team fastest lap: {team_lap['car']} at {team_lap['track']}"
-            f"{' (yours 🏆)' if mine_is_fastest else ''}"
+            f"{' (yours *)' if mine_is_fastest else ''}"
         )
         parts = [
             header,

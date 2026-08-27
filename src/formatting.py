@@ -88,21 +88,22 @@ def segment_table(segments: Sequence[Segment], reference_name: str, lap_name: st
     if not segments:
         return "_No sector data available._"
 
-    lines = [
-        "| Sector | Time delta | Min speed | Avg speed | Full throttle |",
-        "|---|---|---|---|---|",
+    rows = [
+        [
+            seg.name,
+            f"{seg.start_pct * 100:.0f}-{seg.end_pct * 100:.0f}",
+            f"{seg.time_delta:+.3f}",
+            kmh(seg.min_speed), kmh(seg.ref_min_speed),
+            kmh(seg.avg_speed), kmh(seg.ref_avg_speed),
+            f"{seg.full_throttle_pct * 100:.0f}", f"{seg.ref_full_throttle_pct * 100:.0f}",
+        ]
+        for seg in segments
     ]
-    for seg in segments:
-        lines.append(
-            f"| {seg.name} ({seg.start_pct * 100:.0f}-{seg.end_pct * 100:.0f}%) "
-            f"| **{seg.time_delta:+.3f}s** "
-            f"| {kmh(seg.min_speed)} vs {kmh(seg.ref_min_speed)} km/h "
-            f"| {kmh(seg.avg_speed)} vs {kmh(seg.ref_avg_speed)} km/h "
-            f"| {seg.full_throttle_pct * 100:.0f}% vs {seg.ref_full_throttle_pct * 100:.0f}% |"
-        )
-    lines.append("")
-    lines.append(f"_Each cell reads `{lap_name} vs {reference_name}`._")
-    return "\n".join(lines)
+    headers = ["sector", "range%", "\u0394s", "minL", "minR", "avgL", "avgR", "ftL", "ftR"]
+    return (
+        f"```\n{fixed_table(headers, rows)}\n```\n"
+        f"_L={lap_name}, R={reference_name}; speeds km/h, ft=full-throttle % of sector._"
+    )
 
 
 def _pct(value: Optional[float]) -> str:
@@ -321,7 +322,7 @@ def comparison_report(
         # Should not happen with per-lap normalisation; surface it if it does
         # rather than quietly presenting numbers that don't reconcile.
         footnotes.append(
-            f"⚠️ Integrated gap {comparison.total_delta:+.3f}s does not match the "
+            f"WARNING: integrated gap {comparison.total_delta:+.3f}s does not match the "
             f"recorded gap {comparison.stated_delta:+.3f}s ({error:+.3f}s) — "
             "treat the breakdown with caution."
         )
