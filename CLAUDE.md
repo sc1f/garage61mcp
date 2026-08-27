@@ -93,6 +93,22 @@ bypass `_api_get` for a Garage61 call.
 
 `Dockerfile` runs the HTTP entry point; no secrets in the image.
 
+Remote deployment is AWS Lambda behind an API Gateway HTTP API, built by
+`scripts/deploy-lambda.sh` (zip + Lambda Web Adapter layer, ASGI app unchanged).
+App Runner was the original target but stopped accepting new customers in
+April 2026, and its successor (ECS Express Mode) requires an ALB at roughly
+$16-25/month idle — wrong economics for this. Lambda's scale-to-zero fits the
+stateless transport and costs nothing at personal traffic, with two trade-offs
+worth knowing: API Gateway caps a single request at 30s, and in-memory caches
+do not survive cold starts, so a drill-down after a long idle may need its
+comparison re-run.
+
+Credentials are normally headers (`Authorization`, `X-MCP-Access-Key`). They
+are also accepted as `?token=`/`?key=` query parameters, because claude.ai
+connectors (which back the Claude mobile app) cannot send custom headers. That
+is why the Lambda start command passes `--no-access-log`: query strings would
+otherwise put tokens into CloudWatch.
+
 Abuse hardening on the HTTP path (`http_server.py`): oversized bodies are
 rejected at 256 KB by Content-Length before being read; unknown-token
 verifications go through a token bucket (burst 10, 1/s refill) so a flood of
