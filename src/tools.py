@@ -1727,7 +1727,7 @@ async def list_cars(search_term: str = "", show_legacy: bool = False) -> list[Te
                 if legacy_count > 0:
                     response += f"\n\n*Note: {legacy_count} legacy cars hidden. Use 'legacy' in search to see all versions.*"
 
-        return [TextContent(type="text", text=response)]
+        return _ok(response)
 
     except Exception as e:
         logger.error(f"Exception in list_cars: {str(e)}", exc_info=True)
@@ -1820,7 +1820,7 @@ async def list_tracks(search_term: str = "") -> list[TextContent]:
 
                 count += 1
 
-        return [TextContent(type="text", text=response)]
+        return _ok(response)
 
     except Exception as e:
         logger.error(f"Exception in list_tracks: {str(e)}", exc_info=True)
