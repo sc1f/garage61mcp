@@ -13,14 +13,23 @@ Environment:
                                     X-MCP-Access-Key -- makes the endpoint
                                     effectively private (strangers cost nothing)
 
-Credentials travel as headers. The Garage61 token goes in `Authorization:
-Bearer <token>` or in `X-Garage61-Token: <token>`. The second name exists
-because a client that also supports OAuth can reserve the `Authorization`
-header for its own use.
+Credentials can arrive in several ways, because clients differ in what they
+permit. The server accepts all of these:
 
-Query parameters (?key=...&token=...) are also accepted, for clients that can
-send neither header. That path puts credentials in the URL, thus the access log
-stays off.
+    authorization: Bearer <garage61 token>   (the scheme word is optional)
+    x-api-key: <access key>
+    ?key=<access key>&token=<garage61 token>
+
+ACCESS_KEY_HEADERS and TOKEN_HEADERS give the other accepted names.
+
+Some clients accept only an allowlist of header names. The claude.ai connector
+rejects a custom name with "header name is not allowed". For those clients, put
+both credentials in the one header that they permit:
+
+    Authorization: Bearer <access key>:<garage61 token>
+
+The server divides that value at the first colon. A Garage61 token contains no
+colon. When credentials can arrive in the URL, the access log stays off.
     GARAGE61_LOG_LEVEL              WARNING by default
 """
 
@@ -119,6 +128,61 @@ async def _verify_token(token: str) -> bool:
     return ok
 
 
+# Clients restrict which header names they permit. The claude.ai connector
+# accepts only names from a list, and rejects any other name with "header name
+# is not allowed". These are the names from that list that carry each
+# credential, and the server accepts all of them.
+ACCESS_KEY_HEADERS = (
+    "x-mcp-access-key", "x-api-key", "api-key", "apikey", "x-apikey",
+    "access-key", "x-key",
+)
+TOKEN_HEADERS = (
+    "x-garage61-token", "x-auth-token", "x-access-token", "x-api-token",
+    "api-token", "x-token",
+)
+
+
+def _first(headers: dict, names) -> str:
+    """The value of the first header present, from a list of accepted names."""
+    for name in names:
+        value = headers.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _extract_credentials(headers: dict, query: dict) -> "tuple[str, str]":
+    """Find the access key and the Garage61 token in a request.
+
+    Clients differ in what they permit. Some accept only an allowlist of header
+    names: the claude.ai connector rejects a custom name with "header name is
+    not allowed". For those clients, both credentials can travel in the one
+    header that they permit, as "<access key>:<garage61 token>".
+    """
+    access = _first(headers, ACCESS_KEY_HEADERS) or (query.get("key") or [""])[0].strip()
+
+    token = ""
+    auth = headers.get("authorization", "").strip()
+    if auth:
+        # The scheme word is optional: some clients add "Bearer" for you, and
+        # some expect the bare value.
+        value = auth[7:].strip() if auth.lower().startswith("bearer ") else auth
+        # Divide the joined form only when no other carrier gave a key, thus a
+        # token that contains a colon stays complete in the usual case.
+        if not access and ":" in value:
+            maybe_key, maybe_token = value.split(":", 1)
+            if maybe_key.strip() and maybe_token.strip():
+                access, token = maybe_key.strip(), maybe_token.strip()
+            else:
+                token = value
+        else:
+            token = value
+
+    if not token:
+        token = _first(headers, TOKEN_HEADERS) or (query.get("token") or [""])[0].strip()
+    return access, token
+
+
 def _unauthorized(detail: str) -> Response:
     return JSONResponse(
         {"error": "unauthorized", "detail": detail},
@@ -141,16 +205,19 @@ class BearerAuthMiddleware:
         headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
         query = parse_qs(scope.get("query_string", b"").decode())
 
+        supplied_key, token = _extract_credentials(headers, query)
+
         # Optional private mode: with an access key configured, requests
         # without it are rejected before any work happens. Constant-time
-        # comparison; the key is a gate, not a user identity. The query-param
-        # form exists for claude.ai connectors (mobile), which cannot send
-        # custom headers.
+        # comparison; the key is a gate, not a user identity.
         access_key = os.getenv("GARAGE61_MCP_ACCESS_KEY", "")
         if access_key:
-            supplied = headers.get("x-mcp-access-key", "") or (query.get("key") or [""])[0]
-            if not hmac.compare_digest(supplied, access_key):
-                response = _unauthorized("Missing or invalid X-MCP-Access-Key.")
+            if not hmac.compare_digest(supplied_key, access_key):
+                response = _unauthorized(
+                    "Missing or invalid access key. Send it as X-MCP-Access-Key, "
+                    "as X-Api-Key, or joined to the token as "
+                    "'Authorization: Bearer <access key>:<garage61 token>'."
+                )
                 await response(scope, receive, send)
                 return
 
@@ -166,27 +233,17 @@ class BearerAuthMiddleware:
             await response(scope, receive, send)
             return
 
-        # The Garage61 token, in order of preference. `X-Garage61-Token` exists
-        # because a client that also does OAuth can reserve or replace the
-        # `Authorization` header; a private header name cannot collide with it.
-        auth = headers.get("authorization", "")
-        alt_token = headers.get("x-garage61-token", "").strip()
-        query_token = (query.get("token") or [""])[0].strip()
-        if not auth:
-            fallback = alt_token or query_token
-            if fallback:
-                auth = f"Bearer {fallback}"
-        if not auth.lower().startswith("bearer ") or not auth[7:].strip():
+        if not token:
             response = _unauthorized(
-                "Provide your Garage61 personal access token. Use the header "
-                "'Authorization: Bearer <token>' or the header "
-                "'X-Garage61-Token: <token>'. Create a token at "
-                "https://garage61.net (Account -> API)."
+                "Provide your Garage61 personal access token as "
+                "'Authorization: Bearer <token>'. If your client also needs an "
+                "access key and permits only one header, join them: "
+                "'Authorization: Bearer <access key>:<token>'. Create a token "
+                "at https://garage61.net (Account -> API)."
             )
             await response(scope, receive, send)
             return
 
-        token = auth[7:].strip()
         if not await _verify_token(token):
             response = _unauthorized("Garage61 rejected this token.")
             await response(scope, receive, send)
