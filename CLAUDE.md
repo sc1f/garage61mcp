@@ -1,7 +1,5 @@
 # Garage61 MCP Server
 
-This document uses ASD-STE100 Simplified Technical English.
-
 ## Overview
 
 This is an MCP (Model Context Protocol) server. It gives Claude access to the

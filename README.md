@@ -1,7 +1,5 @@
 # Garage61 MCP Server
 
-This document uses ASD-STE100 Simplified Technical English.
-
 An MCP (Model Context Protocol) server that connects Claude to the Garage61
 iRacing telemetry API. You can ask about your lap times and your telemetry data
 in usual language. The primary function is a comparison of two laps that shows
