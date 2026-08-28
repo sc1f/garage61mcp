@@ -13,10 +13,14 @@ Environment:
                                     X-MCP-Access-Key -- makes the endpoint
                                     effectively private (strangers cost nothing)
 
-Credentials normally travel as headers. They are ALSO accepted as query
-parameters (?key=...&token=...) because claude.ai connectors -- which is what
-the Claude mobile app uses -- cannot send custom headers. When serving that
-path, never log query strings.
+Credentials travel as headers. The Garage61 token goes in `Authorization:
+Bearer <token>` or in `X-Garage61-Token: <token>`. The second name exists
+because a client that also supports OAuth can reserve the `Authorization`
+header for its own use.
+
+Query parameters (?key=...&token=...) are also accepted, for clients that can
+send neither header. That path puts credentials in the URL, thus the access log
+stays off.
     GARAGE61_LOG_LEVEL              WARNING by default
 """
 
@@ -162,14 +166,21 @@ class BearerAuthMiddleware:
             await response(scope, receive, send)
             return
 
+        # The Garage61 token, in order of preference. `X-Garage61-Token` exists
+        # because a client that also does OAuth can reserve or replace the
+        # `Authorization` header; a private header name cannot collide with it.
         auth = headers.get("authorization", "")
+        alt_token = headers.get("x-garage61-token", "").strip()
         query_token = (query.get("token") or [""])[0].strip()
-        if query_token and not auth:
-            auth = f"Bearer {query_token}"
+        if not auth:
+            fallback = alt_token or query_token
+            if fallback:
+                auth = f"Bearer {fallback}"
         if not auth.lower().startswith("bearer ") or not auth[7:].strip():
             response = _unauthorized(
-                "Provide your Garage61 personal access token as "
-                "'Authorization: Bearer <token>'. Create one at "
+                "Provide your Garage61 personal access token. Use the header "
+                "'Authorization: Bearer <token>' or the header "
+                "'X-Garage61-Token: <token>'. Create a token at "
                 "https://garage61.net (Account -> API)."
             )
             await response(scope, receive, send)
