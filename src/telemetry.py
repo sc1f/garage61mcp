@@ -163,6 +163,14 @@ class CornerComparison:
     # pedal shape in seconds, which is where trail-braking differences live.
     brake: Optional[BrakeEvent] = None
     ref_brake: Optional[BrakeEvent] = None
+    # Input-shape measurements for each lap (see CornerDynamics).
+    dynamics: Optional["CornerDynamics"] = None
+    ref_dynamics: Optional["CornerDynamics"] = None
+    # Lateral offset of the compared lap from the reference line, metres,
+    # positive = left of the reference's direction of travel.
+    line_entry_m: Optional[float] = None
+    line_apex_m: Optional[float] = None
+    line_exit_m: Optional[float] = None
 
 
 @dataclass
@@ -182,6 +190,9 @@ class Comparison:
     corners: List[CornerComparison] = field(default_factory=list)
     reference: Optional[LapTelemetry] = None
     lap: Optional[LapTelemetry] = None
+    # Signed lateral offset of `lap` from `reference`'s GPS line, per grid
+    # point, metres; positive = left of the reference's travel direction.
+    line_offset: List[float] = field(default_factory=list)
 
     @property
     def integration_error(self) -> Optional[float]:
@@ -205,6 +216,12 @@ CHANNEL_MAP = {
     "Gear": "gear",
     "LatAccel": "lat_accel",
     "LongAccel": "long_accel",
+    # Rotation rate about the vertical axis, rad/s. The direct signal for how
+    # rotation develops through a corner; everything else is a proxy for it.
+    "YawRate": "yaw_rate",
+    # 0/1; any ABS intervention saturates the brake channel's usefulness, so
+    # callers need to check this before reading anything else in a corner.
+    "ABSActive": "abs",
     # Position, used to derive corner direction and radius.
     "Lat": "lat",
     "Lon": "lon",
@@ -843,17 +860,30 @@ def _first_crossing(
     return None
 
 
-def _brake_for_corner(
-    events: Sequence[BrakeEvent], corner: Corner
-) -> Optional[BrakeEvent]:
-    """The braking application feeding a corner: the last one ending by the apex."""
-    candidates = [
-        e for e in events
-        if e.start_pct <= corner.apex_pct and e.end_pct >= corner.start_pct - 0.05
-    ]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda e: e.start_pct)
+def assign_brakes_to_corners(
+    events: Sequence[BrakeEvent], corners: Sequence[Corner]
+) -> Dict[int, BrakeEvent]:
+    """Give each braking event to exactly one corner: the first apex it feeds.
+
+    A loose per-corner match made linked corners share one event, so a corner
+    taken flat displayed its neighbour's brake shape as if it were its own.
+    Unique assignment keeps "no braking here" visible as exactly that; where two
+    events feed the same apex (a stab then the real stop), the one ending
+    closest to the apex wins.
+    """
+    out: Dict[int, BrakeEvent] = {}
+    for event in events:
+        target = None
+        for corner in corners:
+            if corner.apex_pct >= event.start_pct:
+                target = corner
+                break
+        if target is None:
+            continue
+        held = out.get(target.number)
+        if held is None or event.end_pct > held.end_pct:
+            out[target.number] = event
+    return out
 
 
 def compare_corners(
@@ -862,6 +892,7 @@ def compare_corners(
     corners: Sequence[Corner],
     trace: Sequence[float],
     track_length_m: Optional[float] = None,
+    line_offset: Optional[Sequence[float]] = None,
 ) -> List[CornerComparison]:
     """Measure both laps through each detected corner."""
     results: List[CornerComparison] = []
@@ -869,6 +900,8 @@ def compare_corners(
 
     lap_brakes = detect_brake_events(lap, track_length_m=track_length_m)
     ref_brakes = detect_brake_events(reference, track_length_m=track_length_m)
+    lap_brake_map = assign_brakes_to_corners(lap_brakes, corners)
+    ref_brake_map = assign_brakes_to_corners(ref_brakes, corners)
 
     for corner in corners:
         start_idx = _index_for(lap.distance, corner.start_pct)
@@ -929,8 +962,23 @@ def compare_corners(
                 ),
                 apex_gear=int(round(apex_gear)) if apex_gear is not None else None,
                 ref_apex_gear=int(round(ref_apex_gear)) if ref_apex_gear is not None else None,
-                brake=_brake_for_corner(lap_brakes, corner),
-                ref_brake=_brake_for_corner(ref_brakes, corner),
+                brake=lap_brake_map.get(corner.number),
+                ref_brake=ref_brake_map.get(corner.number),
+                dynamics=compute_corner_dynamics(
+                    lap, corner, lap_brake_map.get(corner.number), track_length_m
+                ),
+                ref_dynamics=compute_corner_dynamics(
+                    reference, corner, ref_brake_map.get(corner.number), track_length_m
+                ),
+                line_entry_m=(
+                    line_offset[start_idx] if line_offset and start_idx < len(line_offset) else None
+                ),
+                line_apex_m=(
+                    line_offset[apex_idx] if line_offset and apex_idx < len(line_offset) else None
+                ),
+                line_exit_m=(
+                    line_offset[end_idx] if line_offset and end_idx < len(line_offset) else None
+                ),
             )
         )
 
@@ -956,8 +1004,10 @@ def compare_laps(
     bounds = build_segment_bounds(sector_times, reference.lap_time, segment_count)
     segments = build_segments(reference, lap, trace, bounds)
 
+    line_offset = line_offset_series(reference, lap)
     corners = compare_corners(
-        reference, lap, corner_map or detect_corners(reference), trace, track_length
+        reference, lap, corner_map or detect_corners(reference), trace,
+        track_length, line_offset
     )
 
     stated = None
@@ -978,6 +1028,7 @@ def compare_laps(
         corners=corners,
         reference=reference,
         lap=lap,
+        line_offset=line_offset,
     )
 
 
@@ -989,3 +1040,289 @@ def downsample(values: Sequence[float], count: int) -> List[float]:
         return list(values)
     step = (len(values) - 1) / (count - 1)
     return [values[int(round(i * step))] for i in range(count)]
+
+
+# --------------------------------------------------------------------------
+# Corner dynamics
+# --------------------------------------------------------------------------
+
+# |steering| below this never counts as "steering present" (radians, ~2 deg).
+# Kink-sized corners use a fraction of their own peak instead, whichever is
+# larger, so a tiny correction on a straight does not read as turn-in.
+STEER_FLOOR_RAD = 0.035
+
+
+@dataclass
+class CornerDynamics:
+    """Measured input shapes for one lap through one corner.
+
+    Every field is a defined measurement; none is a judgement. Flags name
+    conditions by their definition (e.g. "brake released before turn-in"), and
+    deciding whether a condition is a fault for this car and corner is the
+    caller's job.
+    """
+
+    # Steering shape. Angles in radians here; degrees at the boundary.
+    turn_in_pct: Optional[float] = None      # first sustained steering toward the corner
+    steer_peak_rad: float = 0.0
+    steer_peak_pct: Optional[float] = None
+    steer_mid_ratio: Optional[float] = None  # |steer| at build midpoint / half of peak:
+                                             # 1 = linear build, <1 = progressive, >1 = front-loaded
+    reversal_rad: float = 0.0                # largest mid-corner drop in steering toward the corner
+    reversal_s: float = 0.0                  # duration of that drop
+
+    # Brake/steering coupling, from the corner's assigned brake event.
+    brake_at_turn_in: Optional[float] = None    # brake fraction when steering first arrives
+    steer_at_release_rad: Optional[float] = None  # |steer| when the pedal is fully released
+    overlap_s: float = 0.0                   # time with brake >5% AND steering present
+    coupling: Optional[float] = None         # overlap_s / release_s: 0 = brake then turn,
+                                             # ~1 = release fully shared with steering
+    # Throttle profile, measured from first application after the apex approach.
+    thr_first_pct: Optional[float] = None
+    thr_t50_s: Optional[float] = None        # seconds from first application to 50%
+    thr_t100_s: Optional[float] = None       # seconds from first application to 95%
+    thr_dips: int = 0                        # re-lifts >10% after first application
+    partial_hold_s: float = 0.0              # time at 10-80% throttle with steering
+                                             # >50% of peak and |long accel| < 0.6 m/s^2
+
+    # Rotation-event convergence: where each of the five events lands.
+    ev_brake_release_pct: Optional[float] = None
+    ev_steer_peak_pct: Optional[float] = None
+    ev_yaw_peak_pct: Optional[float] = None
+    ev_min_speed_pct: Optional[float] = None
+    ev_throttle_pct: Optional[float] = None
+    event_spread_m: Optional[float] = None   # span of the events above, in metres
+
+    yaw_peak_rate: Optional[float] = None    # peak |yaw rate| in the corner, rad/s
+    abs_fraction: float = 0.0                # share of the corner with ABS active
+    flags: List[str] = field(default_factory=list)
+
+
+def _steer_threshold(peak_abs: float) -> float:
+    return max(STEER_FLOOR_RAD, 0.15 * peak_abs)
+
+
+def compute_corner_dynamics(
+    lap: LapTelemetry,
+    corner: Corner,
+    brake_event: Optional[BrakeEvent],
+    track_length_m: Optional[float],
+) -> CornerDynamics:
+    """Measure one lap's input shapes through one corner."""
+    d = CornerDynamics()
+    steer = lap.channel("steering")
+    brake = lap.channel("brake")
+    throttle = lap.channel("throttle")
+    speed = lap.speed
+    yaw = lap.channel("yaw_rate")
+    long_accel = lap.channel("long_accel")
+    abs_ch = lap.channel("abs")
+    elapsed = lap.elapsed_time()
+    if not steer or not speed or not elapsed:
+        return d
+
+    last = len(lap.distance) - 1
+    start_idx = max(0, min(last, int(round(corner.start_pct * last))))
+    end_idx = max(0, min(last, int(round(corner.end_pct * last))))
+    # Braking happens before the corner proper; metrics that involve the pedal
+    # look back from the extent start.
+    approach = max(0, start_idx - int(0.04 * last))
+    if end_idx <= start_idx:
+        return d
+
+    def t(i: int) -> float:
+        return elapsed[min(i, len(elapsed) - 1)]
+
+    window = range(start_idx, end_idx + 1)
+    abs_steer = [abs(steer[i]) for i in window]
+    peak_off = max(range(len(abs_steer)), key=abs_steer.__getitem__)
+    peak_idx = start_idx + peak_off
+    d.steer_peak_rad = abs_steer[peak_off]
+    d.steer_peak_pct = lap.distance[peak_idx]
+    threshold = _steer_threshold(d.steer_peak_rad)
+
+    turn_in_idx = None
+    for i in range(approach, peak_idx + 1):
+        if abs(steer[i]) >= threshold:
+            turn_in_idx = i
+            break
+    if turn_in_idx is not None:
+        d.turn_in_pct = lap.distance[turn_in_idx]
+        if brake and turn_in_idx < len(brake):
+            d.brake_at_turn_in = brake[turn_in_idx]
+
+        # Build shape: |steer| at the midpoint of [turn-in, peak] against the
+        # linear build. Needs a meaningful build window to say anything.
+        if peak_idx - turn_in_idx >= 4 and d.steer_peak_rad > 0:
+            mid_idx = (turn_in_idx + peak_idx) // 2
+            d.steer_mid_ratio = abs(steer[mid_idx]) / (d.steer_peak_rad / 2)
+
+        # Largest reversal: biggest drop in steering-toward-the-corner between
+        # turn-in and the last point still meaningfully steered, so the natural
+        # unwind at the exit does not count.
+        sign = 1.0 if steer[peak_idx] >= 0 else -1.0
+        steered_end = end_idx
+        for i in range(end_idx, turn_in_idx, -1):
+            if abs(steer[i]) >= 0.5 * d.steer_peak_rad:
+                steered_end = i
+                break
+        run_start = None
+        best_drop, best_dur = 0.0, 0.0
+        prev = sign * steer[turn_in_idx]
+        high = prev
+        for i in range(turn_in_idx + 1, steered_end + 1):
+            v = sign * steer[i]
+            if v < prev - 1e-4:
+                if run_start is None:
+                    run_start = i - 1
+                    high = prev
+            elif run_start is not None:
+                drop = high - min(sign * steer[j] for j in range(run_start, i))
+                if drop > best_drop:
+                    best_drop = drop
+                    best_dur = t(i) - t(run_start)
+                run_start = None
+            prev = v
+        if run_start is not None:
+            drop = high - min(sign * steer[j] for j in range(run_start, steered_end + 1))
+            if drop > best_drop:
+                best_drop = drop
+                best_dur = t(steered_end) - t(run_start)
+        d.reversal_rad = best_drop
+        d.reversal_s = best_dur
+
+    # Coupling with the assigned brake event.
+    release_idx = None
+    if brake_event is not None and brake:
+        release_idx = max(0, min(last, int(round(brake_event.end_pct * last))))
+        peak_b_idx = max(0, min(last, int(round(brake_event.peak_pct * last))))
+        d.steer_at_release_rad = abs(steer[release_idx])
+        d.ev_brake_release_pct = brake_event.end_pct
+        overlap = 0.0
+        for i in range(peak_b_idx, release_idx):
+            if brake[i] > 0.05 and abs(steer[i]) >= threshold:
+                overlap += t(i + 1) - t(i)
+        d.overlap_s = overlap
+        if brake_event.release_s > 0.05:
+            d.coupling = min(1.0, overlap / brake_event.release_s)
+        if d.turn_in_pct is not None and brake_event.end_pct < d.turn_in_pct:
+            d.flags.append("brake released before turn-in")
+        elif d.coupling is not None and d.coupling < 0.15:
+            d.flags.append("brake and steering not overlapped")
+        # Pedal coming back up mid-corner while steering is still rising.
+        rearmed = False
+        for i in range(release_idx + 1, end_idx):
+            if brake[i] > 0.08 and abs(steer[i]) >= threshold and not rearmed:
+                if i + 2 <= end_idx and abs(steer[i + 2]) > abs(steer[i]):
+                    d.flags.append("brake re-applied while steering rising")
+                else:
+                    d.flags.append("brake re-applied mid-corner")
+                rearmed = True
+
+    # Throttle profile.
+    if throttle:
+        thr_from = release_idx if release_idx is not None else (
+            turn_in_idx if turn_in_idx is not None else start_idx
+        )
+        first_thr = None
+        for i in range(thr_from, min(end_idx + int(0.03 * last), last)):
+            if throttle[i] > 0.10:
+                first_thr = i
+                break
+        if first_thr is not None:
+            d.thr_first_pct = lap.distance[first_thr]
+            d.ev_throttle_pct = lap.distance[first_thr]
+            horizon = min(last, end_idx + int(0.05 * last))
+            for i in range(first_thr, horizon):
+                if d.thr_t50_s is None and throttle[i] >= 0.50:
+                    d.thr_t50_s = t(i) - t(first_thr)
+                if throttle[i] >= 0.95:
+                    d.thr_t100_s = t(i) - t(first_thr)
+                    break
+            drop = 0.0
+            prev = throttle[first_thr]
+            for i in range(first_thr + 1, horizon):
+                if throttle[i] < prev - 1e-3:
+                    drop += prev - throttle[i]
+                else:
+                    if drop > 0.10:
+                        d.thr_dips += 1
+                    drop = 0.0
+                prev = throttle[i]
+            if drop > 0.10:
+                d.thr_dips += 1
+        hold = 0.0
+        for i in range(start_idx, end_idx):
+            steering_high = abs(steer[i]) >= 0.5 * d.steer_peak_rad if d.steer_peak_rad else False
+            flat = abs(long_accel[i]) < 0.6 if long_accel else False
+            if 0.10 < throttle[i] < 0.80 and steering_high and flat:
+                hold += t(i + 1) - t(i)
+        d.partial_hold_s = hold
+        if hold > 0.25:
+            d.flags.append("partial throttle held with steering loaded")
+
+    # Rotation events and their convergence.
+    if yaw:
+        yaw_off = max(window, key=lambda i: abs(yaw[i]))
+        d.yaw_peak_rate = abs(yaw[yaw_off])
+        d.ev_yaw_peak_pct = lap.distance[yaw_off]
+    min_off = min(window, key=lambda i: speed[i])
+    d.ev_min_speed_pct = lap.distance[min_off]
+    d.ev_steer_peak_pct = d.steer_peak_pct
+
+    events = [v for v in (d.ev_brake_release_pct, d.ev_steer_peak_pct,
+                          d.ev_yaw_peak_pct, d.ev_min_speed_pct, d.ev_throttle_pct)
+              if v is not None]
+    if len(events) >= 2 and track_length_m:
+        d.event_spread_m = (max(events) - min(events)) * track_length_m
+
+    if abs_ch:
+        active = sum(1 for i in range(approach, end_idx + 1) if abs_ch[i] > 0.5)
+        d.abs_fraction = active / max(1, end_idx + 1 - approach)
+        if d.abs_fraction > 0.2:
+            d.flags.append("ABS active through the corner")
+
+    return d
+
+
+# --------------------------------------------------------------------------
+# Racing-line offset from GPS
+# --------------------------------------------------------------------------
+
+def line_offset_series(reference: LapTelemetry, lap: LapTelemetry) -> List[float]:
+    """Signed lateral offset of `lap` from `reference`'s path, in metres.
+
+    Positive = left of the reference's direction of travel. Both laps are
+    sampled at the same distance fractions; the position delta is projected
+    onto the normal of the reference's local tangent, so small longitudinal
+    misalignment between the laps does not contaminate the lateral figure.
+    """
+    rlat, rlon = reference.channel("lat"), reference.channel("lon")
+    llat, llon = lap.channel("lat"), lap.channel("lon")
+    if not rlat or not llat:
+        return []
+
+    count = min(len(rlat), len(llat))
+    lat0 = math.radians(rlat[0])
+    m_per_deg_lat = 111_132.0
+    m_per_deg_lon = 111_320.0 * math.cos(lat0)
+
+    def xy(lat_v: float, lon_v: float) -> Tuple[float, float]:
+        return (lon_v * m_per_deg_lon, lat_v * m_per_deg_lat)
+
+    out: List[float] = []
+    for i in range(count):
+        j0, j1 = max(0, i - 1), min(count - 1, i + 1)
+        x0, y0 = xy(rlat[j0], rlon[j0])
+        x1, y1 = xy(rlat[j1], rlon[j1])
+        tx, ty = x1 - x0, y1 - y0
+        norm = math.hypot(tx, ty)
+        if norm < 1e-9:
+            out.append(out[-1] if out else 0.0)
+            continue
+        tx, ty = tx / norm, ty / norm
+        rx, ry = xy(rlat[i], rlon[i])
+        px, py = xy(llat[i], llon[i])
+        # Left normal of (tx, ty) in an east/north frame is (-ty, tx).
+        out.append((px - rx) * -ty + (py - ry) * tx)
+    return out

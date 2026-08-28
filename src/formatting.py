@@ -5,6 +5,8 @@ Returning eight thousand rows of CSV is the same as returning nothing, so
 everything here summarises rather than dumps.
 """
 
+import math
+
 from typing import List, Optional, Sequence
 
 from telemetry import (
@@ -86,21 +88,22 @@ def segment_table(segments: Sequence[Segment], reference_name: str, lap_name: st
     if not segments:
         return "_No sector data available._"
 
-    lines = [
-        "| Sector | Time delta | Min speed | Avg speed | Full throttle |",
-        "|---|---|---|---|---|",
+    rows = [
+        [
+            seg.name,
+            f"{seg.start_pct * 100:.0f}-{seg.end_pct * 100:.0f}",
+            f"{seg.time_delta:+.3f}",
+            kmh(seg.min_speed), kmh(seg.ref_min_speed),
+            kmh(seg.avg_speed), kmh(seg.ref_avg_speed),
+            f"{seg.full_throttle_pct * 100:.0f}", f"{seg.ref_full_throttle_pct * 100:.0f}",
+        ]
+        for seg in segments
     ]
-    for seg in segments:
-        lines.append(
-            f"| {seg.name} ({seg.start_pct * 100:.0f}-{seg.end_pct * 100:.0f}%) "
-            f"| **{seg.time_delta:+.3f}s** "
-            f"| {kmh(seg.min_speed)} vs {kmh(seg.ref_min_speed)} km/h "
-            f"| {kmh(seg.avg_speed)} vs {kmh(seg.ref_avg_speed)} km/h "
-            f"| {seg.full_throttle_pct * 100:.0f}% vs {seg.ref_full_throttle_pct * 100:.0f}% |"
-        )
-    lines.append("")
-    lines.append(f"_Each cell reads `{lap_name} vs {reference_name}`._")
-    return "\n".join(lines)
+    headers = ["sector", "range%", "\u0394s", "minL", "minR", "avgL", "avgR", "ftL", "ftR"]
+    return (
+        f"```\n{fixed_table(headers, rows)}\n```\n"
+        f"_L={lap_name}, R={reference_name}; speeds km/h, ft=full-throttle % of sector._"
+    )
 
 
 def _pct(value: Optional[float]) -> str:
@@ -114,6 +117,43 @@ def _delta_pp(a: Optional[float], b: Optional[float]) -> str:
     return f"{(a - b) * 100:+.2f}pp"
 
 
+def fixed_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
+    """Space-aligned columnar block for dense numeric data.
+
+    Markdown tables spend roughly a third of every row on pipe separators and
+    need a dashes line; for data-dense output that overhead is spent on data
+    instead. Meant to be wrapped in a code fence by the caller.
+    """
+    if not rows:
+        return ""
+    widths = [
+        max(len(str(headers[i])), max(len(str(r[i])) for r in rows))
+        for i in range(len(headers))
+    ]
+    out = ["  ".join(str(h).rjust(widths[i]) for i, h in enumerate(headers))]
+    for r in rows:
+        out.append("  ".join(str(v).rjust(widths[i]) for i, v in enumerate(r)))
+    return "\n".join(out)
+
+
+def uniform_series(values: Sequence[float], start_pct: float, end_pct: float,
+                   fmt: str = "{:+.2f}", per_line: int = 20) -> str:
+    """Values on a uniform distance grid, positions stated once in the header.
+
+    Printing "5%:+0.01" per point spends half the budget restating positions
+    that are implied by a uniform grid; stating the spacing once doubles the
+    resolution the same characters can carry.
+    """
+    if not values:
+        return ""
+    step = (end_pct - start_pct) / (len(values) - 1) if len(values) > 1 else 0
+    head = (f"{start_pct:.1f}% to {end_pct:.1f}% at {step:.2f}% spacing, "
+            f"{len(values)} values:")
+    body_vals = [fmt.format(v) for v in values]
+    lines = [" ".join(body_vals[i:i + per_line]) for i in range(0, len(body_vals), per_line)]
+    return head + "\n" + "\n".join(lines)
+
+
 def corner_table(corners: Sequence[CornerComparison], limit: Optional[int] = None) -> str:
     """Per-corner facts. No interpretation -- that is the reader's job."""
     if not corners:
@@ -124,33 +164,42 @@ def corner_table(corners: Sequence[CornerComparison], limit: Optional[int] = Non
         ordered = ordered[:limit]
     ordered.sort(key=lambda c: c.corner.apex_pct)
 
-    lines = [
-        "| Corner | Delta | Entry km/h | Apex km/h | Exit km/h | Brake pt | Throttle pt | Gear |",
-        "|---|---|---|---|---|---|---|---|",
-    ]
+    def num(v, spec="{:.0f}"):
+        return spec.format(v) if v is not None else "-"
+
+    rows = []
     for c in ordered:
-        gear = (
-            f"{c.apex_gear} vs {c.ref_apex_gear}"
-            if c.apex_gear is not None and c.ref_apex_gear is not None
-            else "—"
-        )
-        lines.append(
-            f"| **{c.corner.name}** @{c.corner.apex_pct * 100:.0f}% "
-            f"| **{c.time_delta:+.3f}s** "
-            f"| {c.entry_speed * MS_TO_KMH:.0f} vs {c.ref_entry_speed * MS_TO_KMH:.0f} "
-            f"| {c.apex_speed * MS_TO_KMH:.0f} vs {c.ref_apex_speed * MS_TO_KMH:.0f} "
-            f"| {c.exit_speed * MS_TO_KMH:.0f} vs {c.ref_exit_speed * MS_TO_KMH:.0f} "
-            f"| {_pct(c.brake_point_pct)} ({_delta_pp(c.brake_point_pct, c.ref_brake_point_pct)}) "
-            f"| {_pct(c.throttle_pickup_pct)} ({_delta_pp(c.throttle_pickup_pct, c.ref_throttle_pickup_pct)}) "
-            f"| {gear} |"
-        )
-    lines.append("")
-    lines.append(
-        "_Each cell reads `this lap vs reference`. Brake point is first brake "
-        "input, throttle point is first full throttle; both as lap distance, so "
-        "a negative delta means earlier._"
+        b, rb = c.brake, c.ref_brake
+        rows.append([
+            f"T{c.corner.number}",
+            f"{c.corner.apex_pct * 100:.1f}",
+            f"{c.time_delta:+.3f}",
+            num(c.entry_speed * MS_TO_KMH), num(c.ref_entry_speed * MS_TO_KMH),
+            num(c.apex_speed * MS_TO_KMH), num(c.ref_apex_speed * MS_TO_KMH),
+            num(c.exit_speed * MS_TO_KMH), num(c.ref_exit_speed * MS_TO_KMH),
+            num(c.brake_point_pct * 100 if c.brake_point_pct is not None else None, "{:.2f}"),
+            num(c.ref_brake_point_pct * 100 if c.ref_brake_point_pct is not None else None, "{:.2f}"),
+            num(c.throttle_pickup_pct * 100 if c.throttle_pickup_pct is not None else None, "{:.2f}"),
+            num(c.ref_throttle_pickup_pct * 100 if c.ref_throttle_pickup_pct is not None else None, "{:.2f}"),
+            num(c.apex_gear), num(c.ref_apex_gear),
+            num(b.peak_pressure * 100 if b else None), num(rb.peak_pressure * 100 if rb else None),
+            num(b.release_s if b else None, "{:.2f}"), num(rb.release_s if rb else None, "{:.2f}"),
+        ])
+
+    headers = ["#", "apex%", "\u0394s", "entL", "entR", "apxL", "apxR", "extL", "extR",
+               "brkL%", "brkR%", "thrL%", "thrR%", "gL", "gR", "pbL", "pbR", "trlL", "trlR"]
+
+    legend = ", ".join(
+        f"T{c.corner.number}={c.corner.label.split('(', 1)[-1].rstrip(')')}"
+        for c in ordered
     )
-    return "\n".join(lines)
+    return (
+        f"```\n{fixed_table(headers, rows)}\n```\n"
+        f"_L=this lap, R=reference. ent/apx/ext = entry/apex/exit speed km/h; "
+        f"brk/thr = first brake input / first full throttle as lap-distance % "
+        f"(lower brk = earlier braking); g = gear at apex; pb = peak brake "
+        f"pressure %; trl = trail-brake release time s. Corners: {legend}._"
+    )
 
 
 def biggest_losses(corners: Sequence[CornerComparison], limit: int = 3) -> str:
@@ -195,16 +244,12 @@ def worst_segments_summary(segments: Sequence[Segment], limit: int = 3) -> str:
     )
 
 
-def delta_trace_sparkline(comparison: Comparison, points: int = 20) -> str:
-    """A coarse cumulative-gap trace, small enough to read at a glance."""
+def delta_trace_sparkline(comparison: Comparison, points: int = 41) -> str:
+    """The cumulative-gap trace on a uniform grid, positions stated once."""
     if not comparison.delta_trace:
         return ""
     thinned = downsample(comparison.delta_trace, points)
-    marks = []
-    for i, value in enumerate(thinned):
-        pct = i / (len(thinned) - 1) * 100 if len(thinned) > 1 else 0
-        marks.append(f"{pct:3.0f}%:{value:+.2f}")
-    return "  ".join(marks)
+    return uniform_series(thinned, 0.0, 100.0)
 
 
 def comparison_report(
@@ -245,12 +290,18 @@ def comparison_report(
         parts.append("")
         parts.append(corner_table(comparison.corners))
         parts.append("")
+        dynamics = corner_dynamics_table(comparison.corners)
+        if dynamics:
+            parts.append("### Corner dynamics")
+            parts.append("")
+            parts.append(dynamics)
+            parts.append("")
 
     trace = delta_trace_sparkline(comparison)
     if trace:
         parts.append("### Cumulative gap around the lap")
         parts.append("")
-        parts.append("Seconds lost (+) or gained (-) by lap distance:")
+        parts.append("Seconds lost (+) or gained (-) since the start line:")
         parts.append("")
         parts.append(f"```\n{trace}\n```")
         parts.append("")
@@ -271,7 +322,7 @@ def comparison_report(
         # Should not happen with per-lap normalisation; surface it if it does
         # rather than quietly presenting numbers that don't reconcile.
         footnotes.append(
-            f"⚠️ Integrated gap {comparison.total_delta:+.3f}s does not match the "
+            f"WARNING: integrated gap {comparison.total_delta:+.3f}s does not match the "
             f"recorded gap {comparison.stated_delta:+.3f}s ({error:+.3f}s) — "
             "treat the breakdown with caution."
         )
@@ -316,11 +367,66 @@ def lap_summary(lap: LapTelemetry, title: str, sector_times: Sequence[float] = (
 
         parts.append("### Speed trace (km/h by lap distance)")
         parts.append("")
-        thinned = downsample(speed, 25)
-        marks = [
-            f"{i / (len(thinned) - 1) * 100:3.0f}%:{v * MS_TO_KMH:5.0f}"
-            for i, v in enumerate(thinned)
-        ]
-        parts.append(f"```\n{'  '.join(marks)}\n```")
+        thinned = [v * MS_TO_KMH for v in downsample(speed, 50)]
+        parts.append(f"```\n{uniform_series(thinned, 0.0, 100.0, fmt='{:.0f}')}\n```")
 
+    return "\n".join(parts)
+
+
+def corner_dynamics_table(corners: Sequence[CornerComparison]) -> str:
+    """Input-shape measurements per corner, both laps side by side.
+
+    Facts with definitions; whether a shape is right for this car and corner is
+    the reader's call.
+    """
+    rows = []
+    flag_notes = []
+    for c in corners:
+        d, r = c.dynamics, c.ref_dynamics
+        if d is None or r is None:
+            continue
+
+        def num(v, spec="{:.2f}"):
+            return spec.format(v) if v is not None else "-"
+
+        def deg(v, spec="{:.0f}"):
+            return spec.format(math.degrees(v)) if v is not None else "-"
+
+        rows.append([
+            f"T{c.corner.number}",
+            num(d.turn_in_pct and d.turn_in_pct * 100), num(r.turn_in_pct and r.turn_in_pct * 100),
+            deg(d.steer_peak_rad), deg(r.steer_peak_rad),
+            num(d.steer_mid_ratio), num(r.steer_mid_ratio),
+            deg(d.reversal_rad), deg(r.reversal_rad),
+            num(d.coupling), num(r.coupling),
+            deg(d.steer_at_release_rad), deg(r.steer_at_release_rad),
+            num(d.thr_t100_s), num(r.thr_t100_s),
+            num(d.partial_hold_s), num(r.partial_hold_s),
+            num(d.event_spread_m, "{:.0f}"), num(r.event_spread_m, "{:.0f}"),
+            num(c.line_apex_m, "{:+.1f}"),
+        ])
+        if d.flags:
+            flag_notes.append(f"T{c.corner.number}: {'; '.join(d.flags)}")
+    if not rows:
+        return ""
+
+    headers = ["#", "tInL", "tInR", "stL", "stR", "midL", "midR", "revL", "revR",
+               "cplL", "cplR", "srlL", "srlR", "t100L", "t100R", "hldL", "hldR",
+               "sprL", "sprR", "lineA"]
+    parts = [
+        f"```\n{fixed_table(headers, rows)}\n```",
+        "_L=this lap, R=reference. tIn = first sustained steering, lap-distance %. "
+        "st = peak steering deg. mid = steering at build midpoint / half of peak "
+        "(1 linear, <1 progressive, >1 front-loaded). rev = largest mid-corner "
+        "drop in steering toward the corner, deg — countersteer included, so it "
+        "can exceed the peak. cpl = share of the brake release spent with "
+        "steering present (0 = brake then turn, 1 = fully shared). srl = "
+        "steering deg at full brake release. t100 = seconds from first throttle "
+        "to full. hld = seconds at 10-80% throttle with steering loaded and no "
+        "longitudinal acceleration. spr = span in metres covering brake release, "
+        "peak steering, peak yaw rate, min speed and first throttle. lineA = "
+        "metres left (+) or right (−) of the reference line at the apex._",
+    ]
+    if flag_notes:
+        parts.append("**Flagged (this lap):** " + " | ".join(flag_notes))
     return "\n".join(parts)

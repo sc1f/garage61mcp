@@ -1,0 +1,9 @@
+.git
+.env*
+!.env.example
+__pycache__
+*.pyc
+*.egg-info
+.venv
+venv
+garage61_mcp/

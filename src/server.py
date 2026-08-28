@@ -11,6 +11,7 @@ from api_client import initialize_cache
 from tools import (
     ALL_TOOLS,
     analyze_consistency,
+    analyze_corner,
     analyze_telemetry_range,
     analyze_telemetry_sector,
     analyze_worst_sections,
@@ -88,6 +89,15 @@ async def _dispatch(name: str, arguments: dict) -> list[TextContent]:
     if name == "analyze_consistency":
         return await analyze_consistency(car, track)
 
+    if name == "analyze_corner":
+        return await analyze_corner(
+            car,
+            track,
+            int(arguments.get("corner_number", 0)),
+            bool(arguments.get("all_laps", False)),
+            max(2, min(12, int(arguments.get("max_laps", 8)))),
+        )
+
     if name == "get_channel_window":
         corner_number = arguments.get("corner_number")
         return await get_channel_window(
@@ -96,7 +106,7 @@ async def _dispatch(name: str, arguments: dict) -> list[TextContent]:
             arguments.get("start_pct", 0),
             arguments.get("end_pct", 100),
             arguments.get("channels"),
-            int(arguments.get("points", 40)),
+            int(arguments.get("points", 60)),
             int(corner_number) if corner_number is not None else None,
         )
 
@@ -124,16 +134,12 @@ async def _dispatch(name: str, arguments: dict) -> list[TextContent]:
     return [TextContent(type="text", text=f"**Error**: Unknown tool '{name}'")]
 
 
-async def main():
-    """Main entry point for the MCP server."""
-    logger.info("Starting Garage61 MCP server")
+def build_server() -> Server:
+    """Construct the MCP Server with all tools registered.
 
-    try:
-        await initialize_cache()
-    except Exception as e:
-        logger.error(f"Failed to initialize cache: {e}")
-        logger.warning("Server will continue but car/track resolution may fail")
-
+    Shared by the stdio entry point (single user, env token) and the HTTP entry
+    point (multi-user, per-request tokens). Transport concerns stay out of here.
+    """
     server = Server("garage61-mcp")
 
     @server.list_tools()
@@ -146,12 +152,31 @@ async def main():
         """Handle tool calls."""
         logger.info(f"Tool called: {name} with arguments: {arguments}")
         try:
+            # No-op when already filled; fills lazily on the HTTP path where
+            # no token exists at process startup.
+            from api_client import ensure_cache
+            await ensure_cache()
             return await _dispatch(name, arguments or {})
         except Exception as e:
             # Surfacing the failure beats raising, which shows the user an
             # opaque transport error with no indication of what went wrong.
             logger.error(f"Error in tool execution: {e}", exc_info=True)
             return [TextContent(type="text", text=f"**Error**: {name} failed: {e}")]
+
+    return server
+
+
+async def main():
+    """Main entry point for the stdio MCP server."""
+    logger.info("Starting Garage61 MCP server")
+
+    try:
+        await initialize_cache()
+    except Exception as e:
+        logger.error(f"Failed to initialize cache: {e}")
+        logger.warning("Server will continue but car/track resolution may fail")
+
+    server = build_server()
 
     logger.info("Starting stdio server")
     async with stdio_server() as (read_stream, write_stream):

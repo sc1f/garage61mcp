@@ -1,10 +1,14 @@
 """Garage61 API client for fetching iRacing telemetry data."""
 
+import asyncio
 import os
+import random
+import time
 import logging
 from typing import Any, Dict, List, Optional
 import httpx
 from pydantic import BaseModel
+from collections import OrderedDict
 from cache import get_cache
 
 # Set up logging
@@ -93,6 +97,53 @@ class TelemetryData(BaseModel):
     brake: TelemetryChannel
 
 
+
+# --- Rate-limit gate -------------------------------------------------------
+# Garage61 documents a continuously refilling token bucket per (application,
+# user, operation): a small burst, then steady refill; 429 bodies carry
+# details.retryAfterSeconds (there is no Retry-After header) and the guidance
+# is to pause the affected operation, wait that long plus jitter, and never
+# retry in parallel. This gate implements exactly that, shared process-wide
+# and keyed per user so one user's throttling never stalls another.
+_RETRY_WAIT_CEILING_S = 20.0   # waits up to this are absorbed inside the call
+_gate_blocked: Dict[tuple, float] = {}   # (user_scope, operation) -> monotonic deadline
+
+
+def _retry_after_seconds(response) -> float:
+    try:
+        value = response.json().get("details", {}).get("retryAfterSeconds")
+        if value is not None:
+            return max(1.0, float(value))
+    except Exception:
+        pass
+    return 5.0
+
+
+def _rate_limit_message(response) -> str:
+    """A 429 the caller can act on: say when to retry, not just that we failed."""
+    return (
+        "Garage61 rate limit reached. "
+        f"Retry in about {int(_retry_after_seconds(response))} seconds."
+    )
+
+
+# Lap telemetry is immutable once recorded, which makes it ideal cache
+# material: comparisons, corner maps and stint views repeatedly re-fetch the
+# same lap CSVs, and each is ~1.3 MB of Garage61 API traffic. Keyed per user
+# deliberately -- serving user B a CSV fetched with user A's token would bypass
+# Garage61's authorization. Bounded LRU; ~50 MB at the cap.
+_TELEMETRY_CACHE_MAX = 40
+_telemetry_csv_cache: "OrderedDict[tuple, Optional[str]]" = OrderedDict()
+
+# Lap lists are the one thing that must eventually refresh (new laps appear as
+# the user drives), so they get a short TTL rather than immutability caching.
+# Within one analysis conversation the same list is otherwise fetched by nearly
+# every tool call, and lap-list requests were what kept tripping the limiter
+# once telemetry became cached.
+_LAP_LIST_TTL_S = 60.0
+_lap_list_cache: Dict[tuple, tuple] = {}   # key -> (expires_monotonic, laps)
+
+
 class Garage61Client:
     """Async client for Garage61 API."""
     
@@ -105,63 +156,67 @@ class Garage61Client:
         }
         self._me: Optional[Dict[str, Any]] = None
     
+
+    async def _api_get(self, path: str, *, params=None, timeout: int = 30) -> "httpx.Response":
+        """All Garage61 GETs go through here: rate-limit gate, one polite retry.
+
+        On 429 the operation is marked blocked until the server-stated deadline,
+        so concurrent work fails fast instead of piling more requests onto an
+        exhausted bucket. A single retry happens only for short waits, after
+        sleeping retryAfterSeconds plus jitter, per the API's documentation.
+        """
+        from reqcontext import user_scope
+        operation = path.strip("/").split("/")[0]
+        key = (user_scope(), operation)
+
+        now = time.monotonic()
+        blocked_for = _gate_blocked.get(key, 0.0) - now
+        if blocked_for > 0:
+            if blocked_for <= _RETRY_WAIT_CEILING_S:
+                await asyncio.sleep(blocked_for + random.uniform(0.2, 0.8))
+            else:
+                raise ValueError(
+                    "Garage61 rate limit active for this operation. "
+                    f"Retry in about {int(blocked_for)} seconds."
+                )
+
+        for attempt in (1, 2):
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.get(
+                    f"{self.base_url}{path}", headers=self.headers, params=params
+                )
+            if response.status_code != 429:
+                _gate_blocked.pop(key, None)
+                return response
+
+            retry_s = _retry_after_seconds(response)
+            _gate_blocked[key] = time.monotonic() + retry_s
+            if attempt == 1 and retry_s <= _RETRY_WAIT_CEILING_S:
+                await asyncio.sleep(retry_s + random.uniform(0.3, 1.0))
+                continue
+            raise ValueError(_rate_limit_message(response))
+
+        raise ValueError(_rate_limit_message(response))
+
     async def get_cars(self) -> List[Dict[str, Any]]:
         """Fetch available cars."""
-        async with httpx.AsyncClient() as client:
-            try:
-                logger.debug(f"Fetching cars from {self.base_url}/cars")
-                response = await client.get(
-                    f"{self.base_url}/cars",
-                    headers=self.headers
-                )
-                response.raise_for_status()
-                data = response.json()
-                logger.debug(f"Cars API response type: {type(data)}")
-                
-                if isinstance(data, dict) and 'items' in data:
-                    items = data['items']
-                    logger.debug(f"Cars API returned {len(items)} items")
-                    logger.debug(f"Cars API sample (first 3): {items[:3] if len(items) > 0 else 'No items'}")
-                    return data
-                elif isinstance(data, list):
-                    logger.debug(f"Cars API returned list with {len(data)} items")
-                    logger.debug(f"Cars API sample (first 3): {data[:3]}")
-                    return data
-                else:
-                    logger.debug(f"Cars API unexpected format: {data}")
-                    return data
-            except httpx.HTTPStatusError as e:
-                logger.error(f"Failed to fetch cars: {e.response.status_code}")
-                raise ValueError(f"Failed to fetch cars: {e.response.status_code}")
+        try:
+            response = await self._api_get("/cars")
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Failed to fetch cars: {e.response.status_code}")
+            raise ValueError(f"Failed to fetch cars: {e.response.status_code}")
     
     async def get_tracks(self) -> List[Dict[str, Any]]:
         """Fetch available tracks."""
-        async with httpx.AsyncClient() as client:
-            try:
-                logger.debug(f"Fetching tracks from {self.base_url}/tracks")
-                response = await client.get(
-                    f"{self.base_url}/tracks",
-                    headers=self.headers
-                )
-                response.raise_for_status()
-                data = response.json()
-                logger.debug(f"Tracks API response type: {type(data)}")
-                
-                if isinstance(data, dict) and 'items' in data:
-                    items = data['items']
-                    logger.debug(f"Tracks API returned {len(items)} items")
-                    logger.debug(f"Tracks API sample (first 3): {items[:3] if len(items) > 0 else 'No items'}")
-                    return data
-                elif isinstance(data, list):
-                    logger.debug(f"Tracks API returned list with {len(data)} items")
-                    logger.debug(f"Tracks API sample (first 3): {data[:3]}")
-                    return data
-                else:
-                    logger.debug(f"Tracks API unexpected format: {data}")
-                    return data
-            except httpx.HTTPStatusError as e:
-                logger.error(f"Failed to fetch tracks: {e.response.status_code}")
-                raise ValueError(f"Failed to fetch tracks: {e.response.status_code}")
+        try:
+            response = await self._api_get("/tracks")
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Failed to fetch tracks: {e.response.status_code}")
+            raise ValueError(f"Failed to fetch tracks: {e.response.status_code}")
     
     async def find_car_id(self, car_name: str) -> Optional[int]:
         """Find car ID by name using cache."""
@@ -239,16 +294,15 @@ class Garage61Client:
         if self._me is not None:
             return self._me
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            try:
-                response = await client.get(f"{self.base_url}/me", headers=self.headers)
-                response.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 401:
-                    raise ValueError("Invalid authentication token")
-                raise ValueError(f"API error fetching profile: {e.response.status_code}")
-            except httpx.RequestError as e:
-                raise ValueError(f"Network error: {str(e)}")
+        try:
+            response = await self._api_get("/me")
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 401:
+                raise ValueError("Invalid authentication token")
+            raise ValueError(f"API error fetching profile: {e.response.status_code}")
+        except httpx.RequestError as e:
+            raise ValueError(f"Network error: {str(e)}")
 
         self._me = response.json()
         return self._me
@@ -265,6 +319,13 @@ class Garage61Client:
         """
         resolved = self.resolve_car_track(car_name, track_name)
 
+        from reqcontext import user_scope
+        cache_key = (user_scope(), "all", resolved["car_id"], resolved["track_id"], limit, group)
+        hit = _lap_list_cache.get(cache_key)
+        if hit and hit[0] > time.monotonic():
+            resolved["laps"] = list(hit[1])
+            return resolved
+
         params = {
             "cars": [resolved["car_id"]],
             "tracks": [resolved["track_id"]],
@@ -275,22 +336,22 @@ class Garage61Client:
             "lapTypes": [1],
         }
 
-        async with httpx.AsyncClient(timeout=90) as client:
-            try:
-                response = await client.get(
-                    f"{self.base_url}/laps", headers=self.headers, params=params
-                )
-                response.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 401:
-                    raise ValueError("Invalid authentication token")
-                raise ValueError(f"API error: {e.response.status_code} - {e.response.text}")
-            except httpx.RequestError as e:
-                raise ValueError(f"Network error: {str(e)}")
+        try:
+            response = await self._api_get("/laps", params=params, timeout=90)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 401:
+                raise ValueError("Invalid authentication token")
+            raise ValueError(f"API error: {e.response.status_code} - {e.response.text}")
+        except httpx.RequestError as e:
+            raise ValueError(f"Network error: {str(e)}")
 
-            laps = [LapData(**lap) for lap in response.json().get("items", [])]
-
-        resolved["laps"] = sorted(laps, key=lambda lap: lap.lapTime)
+        laps = sorted(
+            (LapData(**lap) for lap in response.json().get("items", [])),
+            key=lambda lap: lap.lapTime,
+        )
+        _lap_list_cache[cache_key] = (time.monotonic() + _LAP_LIST_TTL_S, list(laps))
+        resolved["laps"] = laps
         return resolved
 
     async def get_my_laps(
@@ -303,6 +364,16 @@ class Garage61Client:
         """
         resolved = self.resolve_car_track(car_name, track_name)
 
+        from reqcontext import user_scope
+        cache_key = (user_scope(), "me", resolved["car_id"], resolved["track_id"], limit)
+        hit = _lap_list_cache.get(cache_key)
+        if hit and hit[0] > time.monotonic():
+            laps = list(hit[1])
+            if clean_only:
+                laps = [lap for lap in laps if lap.clean]
+            resolved["laps"] = laps
+            return resolved
+
         params = {
             "cars": [resolved["car_id"]],
             "tracks": [resolved["track_id"]],
@@ -312,31 +383,31 @@ class Garage61Client:
             "lapTypes": [1],   # full laps only
         }
 
-        async with httpx.AsyncClient(timeout=60) as client:
-            try:
-                response = await client.get(
-                    f"{self.base_url}/laps", headers=self.headers, params=params
-                )
-                response.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 401:
-                    raise ValueError("Invalid authentication token")
-                raise ValueError(f"API error: {e.response.status_code} - {e.response.text}")
-            except httpx.RequestError as e:
-                raise ValueError(f"Network error: {str(e)}")
+        try:
+            response = await self._api_get("/laps", params=params, timeout=60)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 401:
+                raise ValueError("Invalid authentication token")
+            raise ValueError(f"API error: {e.response.status_code} - {e.response.text}")
+        except httpx.RequestError as e:
+            raise ValueError(f"Network error: {str(e)}")
 
-            laps = [LapData(**lap) for lap in response.json().get("items", [])]
+        laps = [LapData(**lap) for lap in response.json().get("items", [])]
+        laps.sort(key=lambda lap: lap.startTime)
+        _lap_list_cache[cache_key] = (time.monotonic() + _LAP_LIST_TTL_S, list(laps))
 
         if clean_only:
             laps = [lap for lap in laps if lap.clean]
 
-        laps.sort(key=lambda lap: lap.startTime)
         resolved["laps"] = laps
         return resolved
 
     async def get_laps(self, car_ids: List[int], track_ids: List[int], limit: int = 50, try_telemetry: bool = True) -> List[LapData]:
         """Fetch laps for specific car and track IDs. Tries with telemetry first, falls back without on 403."""
-        async with httpx.AsyncClient() as client:
+        # The client below is vestigial: requests go through _api_get for the
+        # rate-limit gate. Kept to avoid re-indenting this legacy function.
+        async with httpx.AsyncClient(timeout=30) as client:
             # First try with telemetry if requested
             if try_telemetry:
                 try:
@@ -350,11 +421,7 @@ class Garage61Client:
                     }
                     
                     logger.debug(f"Trying to fetch laps with telemetry: {params}")
-                    response = await client.get(
-                        f"{self.base_url}/laps",
-                        headers=self.headers,
-                        params=params
-                    )
+                    response = await self._api_get("/laps", params=params)
                     response.raise_for_status()
                     
                     data = response.json()
@@ -383,11 +450,7 @@ class Garage61Client:
                 }
                 
                 logger.debug(f"Fetching laps without telemetry requirement: {params}")
-                response = await client.get(
-                    f"{self.base_url}/laps",
-                    headers=self.headers,
-                    params=params
-                )
+                response = await self._api_get("/laps", params=params)
                 response.raise_for_status()
                 
                 data = response.json()
@@ -408,33 +471,42 @@ class Garage61Client:
                 raise ValueError(f"Network error: {str(e)}")
     
     async def get_lap_telemetry_csv(self, lap_id: str) -> Optional[str]:
-        """Fetch telemetry data for a specific lap as CSV. Returns None if Pro plan required."""
-        async with httpx.AsyncClient() as client:
-            try:
-                logger.debug(f"Attempting to fetch telemetry for lap {lap_id}")
-                response = await client.get(
-                    f"{self.base_url}/laps/{lap_id}/csv",
-                    headers=self.headers
-                )
-                response.raise_for_status()
-                
-                logger.debug(f"Successfully fetched telemetry for lap {lap_id}")
-                return response.text
-                
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 403:
-                    logger.info(f"Pro plan required for telemetry data (lap {lap_id})")
-                    return None  # Pro plan required, return None instead of raising
-                elif e.response.status_code == 404:
-                    logger.warning(f"Telemetry data not found for lap ID '{lap_id}'")
-                    return None
-                elif e.response.status_code == 401:
-                    raise ValueError("Invalid authentication token")
-                else:
-                    raise ValueError(f"API error: {e.response.status_code} - {e.response.text}")
-            except httpx.RequestError as e:
-                raise ValueError(f"Network error: {str(e)}")
-    
+        """Fetch telemetry data for a specific lap as CSV. Returns None if Pro plan required.
+
+        Cached per (user, lap): laps are immutable, and re-downloads were the
+        bulk of our Garage61 API traffic (rate limits were being hit).
+        """
+        from reqcontext import user_scope
+        cache_key = (user_scope(), lap_id)
+        if cache_key in _telemetry_csv_cache:
+            _telemetry_csv_cache.move_to_end(cache_key)
+            return _telemetry_csv_cache[cache_key]
+
+        try:
+            logger.debug(f"Attempting to fetch telemetry for lap {lap_id}")
+            response = await self._api_get(f"/laps/{lap_id}/csv")
+            response.raise_for_status()
+
+            logger.debug(f"Successfully fetched telemetry for lap {lap_id}")
+            _telemetry_csv_cache[cache_key] = response.text
+            while len(_telemetry_csv_cache) > _TELEMETRY_CACHE_MAX:
+                _telemetry_csv_cache.popitem(last=False)
+            return response.text
+
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 403:
+                logger.info(f"Pro plan required for telemetry data (lap {lap_id})")
+                return None  # Pro plan required, return None instead of raising
+            elif e.response.status_code == 404:
+                logger.warning(f"Telemetry data not found for lap ID '{lap_id}'")
+                return None
+            elif e.response.status_code == 401:
+                raise ValueError("Invalid authentication token")
+            else:
+                raise ValueError(f"API error: {e.response.status_code} - {e.response.text}")
+        except httpx.RequestError as e:
+            raise ValueError(f"Network error: {str(e)}")
+
     def parse_csv_telemetry(self, csv_data: str) -> TelemetryData:
         """Parse CSV telemetry data and extract summary statistics."""
         lines = csv_data.strip().split('\n')
@@ -578,7 +650,7 @@ class Garage61Client:
         logger.debug(f"Found track ID: {track_id}")
         
         # Get laps for current user only
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             # Try with telemetry first, then without if 403
             for try_telemetry in [True, False]:
                 try:
@@ -598,11 +670,7 @@ class Garage61Client:
                         logger.debug("Trying user lap request without telemetry requirement")
                     
                     logger.debug(f"Making API request to {self.base_url}/laps with params: {params}")
-                    response = await client.get(
-                        f"{self.base_url}/laps",
-                        headers=self.headers,
-                        params=params
-                    )
+                    response = await self._api_get("/laps", params=params)
                     logger.debug(f"API response status: {response.status_code}")
                     response.raise_for_status()
                     
@@ -682,7 +750,7 @@ class Garage61Client:
                 raise ValueError(f"Track '{track_name}' not found. Use the list_tracks tool to see all available tracks with variants.")
         
         # Get laps from all accessible drivers (me + teams)
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             # Try with telemetry first, then without if 403
             for try_telemetry in [True, False]:
                 try:
@@ -701,11 +769,7 @@ class Garage61Client:
                     else:
                         logger.debug("Trying overall fastest lap request without telemetry requirement")
                     
-                    response = await client.get(
-                        f"{self.base_url}/laps",
-                        headers=self.headers,
-                        params=params
-                    )
+                    response = await self._api_get("/laps", params=params)
                     response.raise_for_status()
                     
                     data = response.json()
@@ -764,11 +828,17 @@ class Garage61Client:
 
 
 def create_client() -> Garage61Client:
-    """Create a Garage61 client from environment variables."""
+    """Create a Garage61 client for the current caller.
+
+    Over HTTP the token comes from the request's auth context (each request may
+    be a different user); the stdio server falls back to the process-wide
+    GARAGE61_TOKEN environment variable.
+    """
     logger.debug("Creating Garage61 client")
-    token = os.getenv("GARAGE61_TOKEN")
+    from reqcontext import get_request_token
+    token = get_request_token() or os.getenv("GARAGE61_TOKEN")
     if not token:
-        logger.error("GARAGE61_TOKEN environment variable is not set")
+        logger.error("No Garage61 token in request context or environment")
         raise ValueError("GARAGE61_TOKEN environment variable is required")
     
     # Never log any part of the token; length is enough to confirm it loaded.
@@ -776,6 +846,29 @@ def create_client() -> Garage61Client:
     base_url = os.getenv("GARAGE61_BASE_URL", "https://garage61.net/api/v1")
     logger.debug(f"Using base URL: {base_url}")
     return Garage61Client(token, base_url)
+
+
+_cache_init_lock: Optional[asyncio.Lock] = None
+
+
+async def ensure_cache() -> None:
+    """Fill the cars/tracks cache if it is still empty.
+
+    The stdio server warms this at startup with the env token. The HTTP server
+    has no token until a request arrives, so the first authenticated request
+    triggers the fill (the lists are global, not user-specific — any valid
+    token works). A lock stops concurrent first-requests from racing.
+    """
+    global _cache_init_lock
+    cache = get_cache()
+    if cache.cars and cache.tracks:
+        return
+    if _cache_init_lock is None:
+        _cache_init_lock = asyncio.Lock()
+    async with _cache_init_lock:
+        if cache.cars and cache.tracks:
+            return
+        await initialize_cache()
 
 
 async def initialize_cache() -> None:
