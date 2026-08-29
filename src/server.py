@@ -10,6 +10,7 @@ from mcp.types import TextContent
 from api_client import initialize_cache
 from tools import (
     ALL_TOOLS,
+    sanitize,
     analyze_consistency,
     analyze_corner,
     analyze_telemetry_range,
@@ -35,7 +36,7 @@ def _missing_car_track() -> list[TextContent]:
         TextContent(
             type="text",
             text=(
-                "**Error**: Both 'car' and 'track' are required. Use the "
+                "Error: Both 'car' and 'track' are required. Use the "
                 "list_cars and list_tracks tools first to find the exact names."
             ),
         )
@@ -79,7 +80,7 @@ async def _dispatch(name: str, arguments: dict) -> list[TextContent]:
                 TextContent(
                     type="text",
                     text=(
-                        "**Error**: 'driver' is required. Use `list_drivers` to "
+                        "Error: 'driver' is required. Use list_drivers to "
                         "see who has laps on this car/track."
                     ),
                 )
@@ -131,7 +132,7 @@ async def _dispatch(name: str, arguments: dict) -> list[TextContent]:
         return await analyze_worst_sections(car, track)
 
     logger.error(f"Unknown tool requested: {name}")
-    return [TextContent(type="text", text=f"**Error**: Unknown tool '{name}'")]
+    return [TextContent(type="text", text=f"Error: Unknown tool '{name}'")]
 
 
 def build_server() -> Server:
@@ -156,12 +157,14 @@ def build_server() -> Server:
             # no token exists at process startup.
             from api_client import ensure_cache
             await ensure_cache()
-            return await _dispatch(name, arguments or {})
+            # Every response leaves through here, thus the boundary rule
+            # applies even to a tool that builds its own TextContent.
+            return sanitize(await _dispatch(name, arguments or {}))
         except Exception as e:
             # Surfacing the failure beats raising, which shows the user an
             # opaque transport error with no indication of what went wrong.
             logger.error(f"Error in tool execution: {e}", exc_info=True)
-            return [TextContent(type="text", text=f"**Error**: {name} failed: {e}")]
+            return sanitize([TextContent(type="text", text=f"Error: {name} failed: {e}")])
 
     return server
 

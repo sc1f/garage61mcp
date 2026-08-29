@@ -43,7 +43,7 @@ def garage61_link_line(resolved: dict) -> str:
     if not url:
         return ""
     return (
-        f"[View these laps in Garage61]({url}) — pick any two and hit **Analyze** "
+        f"[View these laps in Garage61]({url}) — pick any two and hit Analyze "
         "for the interactive traces."
     )
 
@@ -222,8 +222,8 @@ def biggest_losses(corners: Sequence[CornerComparison], limit: int = 3) -> str:
         if c.brake_point_pct is not None and c.ref_brake_point_pct is not None:
             facts.append(f"brake {_delta_pp(c.brake_point_pct, c.ref_brake_point_pct)}")
         lines.append(
-            f"- **{c.corner.name}** at {c.corner.apex_pct * 100:.0f}%: "
-            f"**{c.time_delta:+.3f}s** ({', '.join(facts)})"
+            f"- {c.corner.name} at {c.corner.apex_pct * 100:.0f}%: "
+            f"{c.time_delta:+.3f}s ({', '.join(facts)})"
         )
     return "\n".join(lines)
 
@@ -238,7 +238,7 @@ def worst_segments_summary(segments: Sequence[Segment], limit: int = 3) -> str:
     if not losses:
         return "_No significant time loss in any sector._"
     return "\n".join(
-        f"- **{seg.name}** ({seg.start_pct * 100:.0f}-{seg.end_pct * 100:.0f}%): "
+        f"- {seg.name} ({seg.start_pct * 100:.0f}-{seg.end_pct * 100:.0f}%): "
         f"lost {seg.time_delta:.3f}s"
         for seg in losses
     )
@@ -263,9 +263,9 @@ def comparison_report(
     parts = [f"## {title}", ""]
 
     parts.append(
-        f"**{reference_name}**: {format_lap_time(comparison.reference_time)}  \n"
-        f"**{lap_name}**: {format_lap_time(comparison.lap_time)}  \n"
-        f"**Gap**: {format_gap(comparison.stated_delta)}"
+        f"{reference_name}: {format_lap_time(comparison.reference_time)}  \n"
+        f"{lap_name}: {format_lap_time(comparison.lap_time)}  \n"
+        f"Gap: {format_gap(comparison.stated_delta)}"
     )
     parts.append("")
 
@@ -335,13 +335,13 @@ def lap_summary(lap: LapTelemetry, title: str, sector_times: Sequence[float] = (
     """Single-lap overview -- no comparison, just what the lap looked like."""
     speed = lap.speed
     parts = [f"## {title}", ""]
-    parts.append(f"**Lap time**: {format_lap_time(lap.lap_time)}")
+    parts.append(f"Lap time: {format_lap_time(lap.lap_time)}")
 
     if sector_times:
         splits = "  ".join(
             f"S{i}: {t:.3f}s" for i, t in enumerate(sector_times, start=1)
         )
-        parts.append(f"**Sectors**: {splits}")
+        parts.append(f"Sectors: {splits}")
     parts.append("")
 
     if speed:
@@ -350,18 +350,18 @@ def lap_summary(lap: LapTelemetry, title: str, sector_times: Sequence[float] = (
         gear = lap.channel("gear")
         parts.append("### Lap characteristics")
         parts.append("")
-        parts.append(f"- Top speed: **{kmh(max(speed))} km/h**")
-        parts.append(f"- Minimum speed: **{kmh(min(speed))} km/h**")
-        parts.append(f"- Average speed: **{kmh(sum(speed) / len(speed))} km/h**")
+        parts.append(f"- Top speed: {kmh(max(speed))} km/h")
+        parts.append(f"- Minimum speed: {kmh(min(speed))} km/h")
+        parts.append(f"- Average speed: {kmh(sum(speed) / len(speed))} km/h")
         if throttle:
             full = sum(1 for v in throttle if v > 0.95) / len(throttle) * 100
-            parts.append(f"- Full throttle: **{full:.0f}%** of the lap")
+            parts.append(f"- Full throttle: {full:.0f}% of the lap")
         if brake:
             braking = sum(1 for v in brake if v > 0.05) / len(brake) * 100
-            parts.append(f"- On the brakes: **{braking:.0f}%** of the lap")
-            parts.append(f"- Peak brake input: **{max(brake) * 100:.0f}%**")
+            parts.append(f"- On the brakes: {braking:.0f}% of the lap")
+            parts.append(f"- Peak brake input: {max(brake) * 100:.0f}%")
         if gear:
-            parts.append(f"- Highest gear: **{int(max(gear))}**")
+            parts.append(f"- Highest gear: {int(max(gear))}")
         parts.append(f"- Telemetry samples: {lap.sample_count}")
         parts.append("")
 
@@ -428,5 +428,5 @@ def corner_dynamics_table(corners: Sequence[CornerComparison]) -> str:
         "metres left (+) or right (−) of the reference line at the apex._",
     ]
     if flag_notes:
-        parts.append("**Flagged (this lap):** " + " | ".join(flag_notes))
+        parts.append("Flagged (this lap): " + " | ".join(flag_notes))
     return "\n".join(parts)

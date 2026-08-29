@@ -253,8 +253,16 @@ A series on a uniform grid (`uniform_series`) gives the spacing one time. It
 does not print a position with each value. The same quantity of characters thus
 gives two times the resolution.
 
-The `_ok()` function removes all bold markers at the output boundary. The code
-that makes the output stays easy to read. Do not add emphasis or emoji again.
+No builder writes bold. Do not add emphasis or emoji again.
+
+The `sanitize()` function is the backstop. The `call_tool` function in
+`server.py` sends every response through it. This is the only point that all
+output goes through. Thus a tool that builds its own `TextContent` cannot send
+markup by mistake. An earlier version relied on each tool to call `_ok()`. The
+`list_cars` and `list_tracks` tools did not call it, and their bold markers
+reached the client. A client showed this fault. The tests did not.
+
+The tool descriptions do not go through `sanitize()`. Keep them plain.
 
 Three Markdown elements stay, because they help the model. The `##` headings
 give a structure that the model can refer to. The code fences show which
@@ -404,6 +412,42 @@ decorators. The `server.py` module uses these decorators. An installation
 without a version limit gets version 2.0. The server then stops at startup with
 this message: `AttributeError: 'Server' object has no attribute 'list_tools'`.
 A change to the 2.x `MCPServer` API is a separate task.
+
+## Tests
+
+Run `pytest` in the top directory of the repository. The `pytest.ini` file puts
+`src/` on the path.
+
+The tests use synthetic telemetry, not the Garage61 API. The `tests/conftest.py`
+file makes a lap with corners at positions that you give it. Thus a test can
+assert that the code finds a corner where the test put it. No test needs a
+token or a network.
+
+The generated lap must agree with itself. The GPS path, the speed channel and
+the lap time must all describe the same track. If they do not agree, a test of
+`estimate_track_length` measures the fault in the fixture and not the code.
+
+These are the test files:
+
+- `test_telemetry.py` — the parse, the track length, the delta-time, the corner
+  detection, the corner map, the brake events, and the offset of the line.
+- `test_lapquality.py` — the removal of the bad laps, and the reasons.
+- `test_formatting.py` — the output format, and the guards on the markup.
+- `test_http_auth.py` — each header name and query parameter that gives the
+  credentials.
+- `test_rate_limit.py` — the behaviour of the gate at a 429 response.
+- `test_cache_isolation.py` — the division of the caches between users.
+
+Two tests protect a fault that returned more than one time:
+
+- `test_a_speed_channel_error_does_not_make_a_false_difference` keeps each lap
+  on its own integral. A shared track length made a difference of +1.094s from
+  an actual difference of +0.265s.
+- `test_no_builder_writes_a_bold_marker` keeps the markup out of the output.
+
+GitHub Actions runs the tests on each push to `main` and on each pull request.
+The workflow also makes sure that the `mcp` package stays below version 2.
+The workflow does not deploy. Run `./scripts/deploy-lambda.sh` on your computer.
 
 ## The layout of the repository
 
