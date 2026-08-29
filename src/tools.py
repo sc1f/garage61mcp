@@ -113,10 +113,18 @@ def _err(message: str) -> list[TextContent]:
 
 
 def _ok(message: str) -> list[TextContent]:
-    # The consumer is a model, not a renderer: bold markers are four characters
-    # of noise per emphasis. Structure (headers, fences, legends) stays; the
-    # cosmetics go here, at the boundary, so the builders stay readable.
-    return [TextContent(type="text", text=message.replace("**", ""))]
+    """Wrap one finished message as a tool response.
+
+    The consumer is a model, not a renderer. No builder writes bold, and no
+    builder writes emoji. The structure stays, because it helps the model:
+    the ## headings, the code fences, and the _..._ legends.
+
+    An earlier version removed the bold markers here. That was a correction
+    after the fact, and it hid the fault: output that carried markup looked
+    correct when you ran the server. The builders are correct now, and a test
+    keeps them correct.
+    """
+    return [TextContent(type="text", text=message)]
 
 
 # --------------------------------------------------------------------------
@@ -203,8 +211,8 @@ async def list_my_laps(car: str, track: str, clean_only: bool = False) -> list[T
 
         if not laps:
             return _err(
-                f"No laps found for **{result['car_resolved']}** at "
-                f"**{result['track_resolved']}**. You haven't driven this "
+                f"No laps found for {result['car_resolved']} at "
+                f"{result['track_resolved']}. You haven't driven this "
                 "combination yet, or the laps aren't accessible with your plan."
             )
 
@@ -217,10 +225,10 @@ async def list_my_laps(car: str, track: str, clean_only: bool = False) -> list[T
         lines = [
             f"## Your laps: {result['car_resolved']} at {result['track_resolved']}",
             "",
-            f"**{len(laps)} laps** across "
+            f"{len(laps)} laps across "
             f"{len({lap.startTime[:10] for lap in laps})} days, "
             f"{len(laps) - len(excluded)} representative. "
-            f"Personal best **{format_lap_time(best.lapTime)}** "
+            f"Personal best {format_lap_time(best.lapTime)} "
             f"({best.startTime[:10]}).",
             "",
         ]
@@ -254,7 +262,7 @@ async def list_my_laps(car: str, track: str, clean_only: bool = False) -> list[T
         lines.append("")
 
         if excluded:
-            lines.append("**Compromised laps (excluded from comparisons):**")
+            lines.append("Compromised laps (excluded from comparisons):")
             lines.append("")
             for lap, verdict in excluded:
                 position = laps.index(lap) + 1
@@ -265,7 +273,7 @@ async def list_my_laps(car: str, track: str, clean_only: bool = False) -> list[T
             trend = latest.lapTime - representative[0].lapTime
             direction = "faster" if trend < 0 else "slower"
             lines.append(
-                f"**Progression**: across your representative laps, the most "
+                f"Progression: across your representative laps, the most "
                 f"recent is {abs(trend):.3f}s {direction} than the earliest. "
                 f"Latest vs personal best: {format_gap(latest.lapTime - best.lapTime)}."
             )
@@ -302,7 +310,7 @@ async def compare_my_laps(
         if len(laps) < 2:
             return _err(
                 f"Need at least two laps to compare, but found {len(laps)} for "
-                f"**{result['car_resolved']}** at **{result['track_resolved']}**."
+                f"{result['car_resolved']} at {result['track_resolved']}."
             )
 
         ref_lap, ref_index = select_lap(laps, reference)
@@ -344,13 +352,13 @@ async def compare_my_laps(
                 zip(ref_lap.sector_times, cmp_lap.sector_times), start=1
             ):
                 splits.append(f"S{i} {cmp_t - ref_t:+.3f}s")
-            notes.append(f"**Sector splits**: {'  '.join(splits)}")
+            notes.append(f"Sector splits: {'  '.join(splits)}")
 
         # Conditions are printed with every comparison, not only when they
         # differ: a clean-looking delta on different track temperature or fuel
         # is a different comparison, and the reader should never have to ask.
         notes.append(
-            f"**Conditions**: this lap {format_conditions(cmp_lap)} / "
+            f"Conditions: this lap {format_conditions(cmp_lap)} / "
             f"reference {format_conditions(ref_lap)}"
         )
         conditions = []
@@ -365,7 +373,7 @@ async def compare_my_laps(
             if abs(fuel) >= 5.0:
                 conditions.append(f"fuel load differs by {fuel:+.1f}L")
         if conditions:
-            notes.append(f"**Caveat**: {'; '.join(conditions)}.")
+            notes.append(f"Caveat: {'; '.join(conditions)}.")
 
         report = comparison_report(
             comparison,
@@ -402,7 +410,7 @@ async def analyze_consistency(car: str, track: str) -> list[TextContent]:
         if len(laps) < 3:
             return _err(
                 f"Consistency analysis needs at least 3 laps; found {len(laps)} "
-                f"for **{result['car_resolved']}** at **{result['track_resolved']}**."
+                f"for {result['car_resolved']} at {result['track_resolved']}."
             )
 
         usable, excluded = split_usable(laps)
@@ -415,14 +423,14 @@ async def analyze_consistency(car: str, track: str) -> list[TextContent]:
         lines = [
             f"## Consistency: {result['car_resolved']} at {result['track_resolved']}",
             "",
-            f"Across **{len(usable)} representative laps** "
+            f"Across {len(usable)} representative laps "
             f"({len(excluded)} excluded as compromised):",
             "",
-            f"- Personal best: **{format_lap_time(best.lapTime)}**",
-            f"- Median: **{format_lap_time(statistics.median(times))}**, "
+            f"- Personal best: {format_lap_time(best.lapTime)}",
+            f"- Median: {format_lap_time(statistics.median(times))}, "
             f"mean {format_lap_time(mean)}",
-            f"- Spread best to worst: **{spread:.3f}s**",
-            f"- Standard deviation: **{stdev:.3f}s**",
+            f"- Spread best to worst: {spread:.3f}s",
+            f"- Standard deviation: {stdev:.3f}s",
             "",
         ]
 
@@ -450,20 +458,20 @@ async def analyze_consistency(car: str, track: str) -> list[TextContent]:
                     worst_sector = (index + 1, s_spread)
                 lines.append(
                     f"| S{index + 1} | {s_best:.3f}s | {statistics.median(values):.3f}s "
-                    f"| {s_worst:.3f}s | **{s_spread:.3f}s** | {s_dev:.3f}s |"
+                    f"| {s_worst:.3f}s | {s_spread:.3f}s | {s_dev:.3f}s |"
                 )
             lines.append("")
 
             gain = best.lapTime - theoretical
             lines.append(
-                f"**Theoretical best** (your fastest sectors combined): "
-                f"**{format_lap_time(theoretical)}** — "
+                f"Theoretical best (your fastest sectors combined): "
+                f"{format_lap_time(theoretical)} — "
                 f"{gain:.3f}s under your actual personal best."
             )
             if worst_sector[0]:
                 lines.append("")
                 lines.append(
-                    f"**Least consistent**: sector {worst_sector[0]}, varying by "
+                    f"Least consistent: sector {worst_sector[0]}, varying by "
                     f"{worst_sector[1]:.3f}s between your best and worst attempt."
                 )
             lines.append("")
@@ -491,7 +499,7 @@ async def analyze_consistency(car: str, track: str) -> list[TextContent]:
             first_best, last_best = min(by_day[days[0]]), min(by_day[days[-1]])
             change = last_best - first_best
             lines.append(
-                f"**Trend**: your best lap went from {first_best:.3f}s on "
+                f"Trend: your best lap went from {first_best:.3f}s on "
                 f"{days[0]} to {last_best:.3f}s on {days[-1]} "
                 f"({change:+.3f}s)."
             )
@@ -582,8 +590,8 @@ async def list_drivers(car: str, track: str) -> list[TextContent]:
 
         if not laps:
             return _err(
-                f"No laps visible for **{result['car_resolved']}** at "
-                f"**{result['track_resolved']}** from you or your teams."
+                f"No laps visible for {result['car_resolved']} at "
+                f"{result['track_resolved']} from you or your teams."
             )
 
         my_slug = me.get("slug")
@@ -592,7 +600,7 @@ async def list_drivers(car: str, track: str) -> list[TextContent]:
         lines = [
             f"## Drivers: {result['car_resolved']} at {result['track_resolved']}",
             "",
-            f"**{len(laps)} drivers** with laps you can access "
+            f"{len(laps)} drivers with laps you can access "
             f"(you and your {len(me.get('teams', []))} team(s)).",
             "",
         ]
@@ -619,10 +627,10 @@ async def list_drivers(car: str, track: str) -> list[TextContent]:
         if mine:
             faster = [lap for lap in laps if lap.lapTime < mine.lapTime]
             lines.append(
-                f"You are **P{laps.index(mine) + 1} of {len(laps)}**"
+                f"You are P{laps.index(mine) + 1} of {len(laps)}"
                 + (
                     f", {len(faster)} driver(s) ahead. Closest is "
-                    f"**{_driver_name(faster[-1])}** at "
+                    f"{_driver_name(faster[-1])} at "
                     f"{format_gap(faster[-1].lapTime - mine.lapTime)}."
                     if faster else " — you're quickest here. *"
                 )
@@ -662,8 +670,8 @@ async def compare_to_driver(car: str, track: str, driver: str) -> list[TextConte
 
         if not laps:
             return _err(
-                f"No laps visible for **{result['car_resolved']}** at "
-                f"**{result['track_resolved']}**."
+                f"No laps visible for {result['car_resolved']} at "
+                f"{result['track_resolved']}."
             )
 
         my_slug = me.get("slug")
@@ -680,8 +688,8 @@ async def compare_to_driver(car: str, track: str, driver: str) -> list[TextConte
 
         if not mine:
             return _err(
-                f"You have no lap for **{result['car_resolved']}** at "
-                f"**{result['track_resolved']}**, so there is nothing to compare."
+                f"You have no lap for {result['car_resolved']} at "
+                f"{result['track_resolved']}, so there is nothing to compare."
             )
         if not theirs:
             return _err(f"No laps found for that driver here.")
@@ -699,9 +707,9 @@ async def compare_to_driver(car: str, track: str, driver: str) -> list[TextConte
             gap = my_lap.lapTime - their_lap.lapTime
             return _ok(
                 f"## You vs {their_name}\n\n"
-                f"**{their_name}**: {format_lap_time(their_lap.lapTime)}  \n"
-                f"**You**: {format_lap_time(my_lap.lapTime)}  \n"
-                f"**Gap**: {format_gap(gap)}\n\n"
+                f"{their_name}: {format_lap_time(their_lap.lapTime)}  \n"
+                f"You: {format_lap_time(my_lap.lapTime)}  \n"
+                f"Gap: {format_gap(gap)}\n\n"
                 "_Their telemetry isn't shared, so only lap times can be "
                 "compared. Their privacy settings control this._"
             )
@@ -733,10 +741,10 @@ async def compare_to_driver(car: str, track: str, driver: str) -> list[TextConte
                     zip(their_lap.sector_times, my_lap.sector_times), start=1
                 )
             )
-            notes.append(f"**Sector splits**: {splits}")
+            notes.append(f"Sector splits: {splits}")
 
         notes.append(
-            f"**Conditions**: you {format_conditions(my_lap)} / "
+            f"Conditions: you {format_conditions(my_lap)} / "
             f"{their_name} {format_conditions(their_lap)}"
         )
         conditions = []
@@ -747,7 +755,7 @@ async def compare_to_driver(car: str, track: str, driver: str) -> list[TextConte
                     f"track temperature differs by {drift:+.1f}°C, which affects grip"
                 )
         if conditions:
-            notes.append(f"**Caveat**: {'; '.join(conditions)}.")
+            notes.append(f"Caveat: {'; '.join(conditions)}.")
 
         ranked = sorted(laps, key=lambda lap: lap.lapTime)
         seen: List[str] = []
@@ -798,8 +806,8 @@ async def get_my_fastest_lap(car: str, track: str) -> list[TextContent]:
 
         if not laps:
             return _err(
-                f"No laps found for **{result['car_resolved']}** at "
-                f"**{result['track_resolved']}**. You haven't driven this "
+                f"No laps found for {result['car_resolved']} at "
+                f"{result['track_resolved']}. You haven't driven this "
                 "combination yet."
             )
 
@@ -812,9 +820,9 @@ async def get_my_fastest_lap(car: str, track: str) -> list[TextContent]:
         if not best.canViewTelemetry:
             return _ok(
                 f"## {title}\n\n"
-                f"**Lap time**: {format_lap_time(best.lapTime)}  \n"
-                f"**Set on**: {best.startTime[:16].replace('T', ' ')}  \n"
-                f"**Conditions**: {format_conditions(best)}\n\n"
+                f"Lap time: {format_lap_time(best.lapTime)}  \n"
+                f"Set on: {best.startTime[:16].replace('T', ' ')}  \n"
+                f"Conditions: {format_conditions(best)}\n\n"
                 "_No telemetry available for this lap (a Pro plan is usually "
                 "required)._"
             )
@@ -822,9 +830,9 @@ async def get_my_fastest_lap(car: str, track: str) -> list[TextContent]:
         telemetry = await _load_telemetry(client, best, "fastest")
         report = lap_summary(telemetry, title, best.sector_times)
         report += (
-            f"\n\n**Set on**: {best.startTime[:16].replace('T', ' ')}  \n"
-            f"**Conditions**: {format_conditions(best)}  \n"
-            f"**Lap ID**: `{best.id}`"
+            f"\n\nSet on: {best.startTime[:16].replace('T', ' ')}  \n"
+            f"Conditions: {format_conditions(best)}  \n"
+            f"Lap ID: `{best.id}`"
         )
         if len(laps) > 1:
             report += (
@@ -870,17 +878,17 @@ async def get_team_fastest_lap(car: str, track: str) -> list[TextContent]:
         parts = [
             header,
             "",
-            f"**Driver**: {team_lap['driver']}"
+            f"Driver: {team_lap['driver']}"
             f"{' (you)' if mine_is_fastest else ''}  ",
-            f"**Lap time**: {format_lap_time(team_lap['lap_time'])}  ",
-            f"**Lap ID**: `{team_lap['id']}`",
+            f"Lap time: {format_lap_time(team_lap['lap_time'])}  ",
+            f"Lap ID: `{team_lap['id']}`",
             "",
         ]
 
         if my_lap and not mine_is_fastest:
             gap = my_lap.lapTime - team_lap["lap_time"]
             parts.append(
-                f"**Your personal best**: {format_lap_time(my_lap.lapTime)} "
+                f"Your personal best: {format_lap_time(my_lap.lapTime)} "
                 f"({format_gap(gap)})"
             )
             parts.append("")
@@ -925,8 +933,8 @@ async def compare_my_telemetry_to_team(car: str, track: str) -> list[TextContent
         my_laps: List[LapData] = my_result["laps"]
         if not my_laps:
             return _err(
-                f"You have no laps for **{my_result['car_resolved']}** at "
-                f"**{my_result['track_resolved']}**, so there is nothing to compare."
+                f"You have no laps for {my_result['car_resolved']} at "
+                f"{my_result['track_resolved']}, so there is nothing to compare."
             )
         my_lap = min(my_laps, key=lambda lap: lap.lapTime)
 
@@ -1050,10 +1058,10 @@ async def analyze_telemetry_range(
         lines = [
             f"## Range analysis: {start * 100:.1f}% – {end * 100:.1f}% of the lap",
             "",
-            f"**{entry['lap_name']}** vs **{entry['reference_name']}**",
+            f"{entry['lap_name']} vs {entry['reference_name']}",
             "",
-            f"**Time {'lost' if time_delta > 0 else 'gained'} in this range**: "
-            f"**{time_delta:+.3f}s** "
+            f"Time {'lost' if time_delta > 0 else 'gained'} in this range: "
+            f"{time_delta:+.3f}s "
             f"(of {comparison.total_delta:+.3f}s across the full lap)",
             "",
         ]
@@ -1063,7 +1071,7 @@ async def analyze_telemetry_range(
             lines.append("")
             for seg in overlapping:
                 lines.append(
-                    f"- **{seg.name}** "
+                    f"- {seg.name} "
                     f"({seg.start_pct * 100:.0f}-{seg.end_pct * 100:.0f}%): "
                     f"{seg.time_delta:+.3f}s, "
                     f"min speed {kmh(seg.min_speed)} vs "
@@ -1268,7 +1276,7 @@ async def get_channel_window(
         lines = [
             f"## Telemetry {start * 100:.1f}% – {end * 100:.1f}%",
             "",
-            f"**{entry['lap_name']}** (L) vs **{entry['reference_name']}** (R), "
+            f"{entry['lap_name']} (L) vs {entry['reference_name']} (R), "
             f"{len(indices)} samples.",
             "",
             f"```\n{fixed_table(header, rows)}\n```",
@@ -1378,7 +1386,7 @@ async def analyze_corner(
 
         if not all_laps:
             d, r = match.dynamics, match.ref_dynamics
-            lines.append(f"**{entry['lap_name']}** (L) vs **{entry['reference_name']}** (R), "
+            lines.append(f"{entry['lap_name']} (L) vs {entry['reference_name']} (R), "
                          f"Δ {match.time_delta:+.3f}s in this corner.")
             lines.append("")
             ev_rows = []
@@ -1451,14 +1459,14 @@ async def analyze_corner(
             if match.line_entry_m is not None:
                 lines.append("")
                 lines.append(
-                    f"**Line vs reference**: entry {match.line_entry_m:+.1f} m, "
+                    f"Line vs reference: entry {match.line_entry_m:+.1f} m, "
                     f"apex {match.line_apex_m:+.1f} m, exit {match.line_exit_m:+.1f} m "
                     "(+ = left of the reference's direction of travel)."
                 )
             flags = (d.flags if d else []) + [f"(ref) {f}" for f in (r.flags if r else [])]
             if flags:
                 lines.append("")
-                lines.append("**Flagged**: " + " | ".join(flags))
+                lines.append("Flagged: " + " | ".join(flags))
             lines.append("")
             lines.append(
                 f"_Raw traces: `get_channel_window` with corner_number={corner_number}._"
@@ -1535,7 +1543,7 @@ async def analyze_corner(
 
         lines.append("")
         lines.append(
-            f"**Variation**: turn-in {spread(tin_vals)} (pct-points) · "
+            f"Variation: turn-in {spread(tin_vals)} (pct-points) · "
             f"peak brake {spread(pb_vals)} (%) · min speed {spread(min_vals)} (km/h) · "
             f"reversal {spread(rev_vals)} (deg)."
         )
@@ -1566,8 +1574,8 @@ async def analyze_worst_sections(car: str, track: str) -> list[TextContent]:
         )
         if not losses:
             return _ok(
-                f"## No time lost\n\n**{entry['lap_name']}** is at least as quick "
-                f"as **{entry['reference_name']}** in every segment."
+                f"## No time lost\n\n{entry['lap_name']} is at least as quick "
+                f"as {entry['reference_name']} in every segment."
             )
 
         # Prefer corners when available: a sector spanning a quarter of the lap
@@ -1584,7 +1592,7 @@ async def analyze_worst_sections(car: str, track: str) -> list[TextContent]:
                     f"## Where {entry['lap_name']} loses time to "
                     f"{entry['reference_name']}",
                     "",
-                    f"Net gap **{comparison.total_delta:+.3f}s**; "
+                    f"Net gap {comparison.total_delta:+.3f}s; "
                     f"{total:.3f}s lost across {len(corner_losses)} corners.",
                     "",
                     corner_table(corner_losses, limit=6),
@@ -1602,7 +1610,7 @@ async def analyze_worst_sections(car: str, track: str) -> list[TextContent]:
         lines = [
             f"## Where {entry['lap_name']} loses time to {entry['reference_name']}",
             "",
-            f"Net gap: **{comparison.total_delta:+.3f}s** "
+            f"Net gap: {comparison.total_delta:+.3f}s "
             f"— {total_lost:.3f}s lost across {len(losses)} "
             f"segment{'s' if len(losses) != 1 else ''}"
             + (
@@ -1624,24 +1632,24 @@ async def analyze_worst_sections(car: str, track: str) -> list[TextContent]:
             )
             lines.append("")
             lines.append(
-                f"- Minimum speed: **{kmh(seg.min_speed)} km/h** vs "
-                f"**{kmh(seg.ref_min_speed)} km/h** "
+                f"- Minimum speed: {kmh(seg.min_speed)} km/h vs "
+                f"{kmh(seg.ref_min_speed)} km/h "
                 f"({(seg.min_speed - seg.ref_min_speed) * MS_TO_KMH:+.1f} km/h)"
             )
             lines.append(
-                f"- Average speed: **{kmh(seg.avg_speed)} km/h** vs "
-                f"**{kmh(seg.ref_avg_speed)} km/h**"
+                f"- Average speed: {kmh(seg.avg_speed)} km/h vs "
+                f"{kmh(seg.ref_avg_speed)} km/h"
             )
             if seg.brake_point_pct is not None and seg.ref_brake_point_pct is not None:
                 shift = (seg.brake_point_pct - seg.ref_brake_point_pct) * 100
                 lines.append(
-                    f"- First brake input at **{seg.brake_point_pct * 100:.2f}%** vs "
-                    f"**{seg.ref_brake_point_pct * 100:.2f}%** "
+                    f"- First brake input at {seg.brake_point_pct * 100:.2f}% vs "
+                    f"{seg.ref_brake_point_pct * 100:.2f}% "
                     f"({abs(shift):.2f}pp {'later' if shift > 0 else 'earlier'})"
                 )
             lines.append(
-                f"- Full throttle: **{seg.full_throttle_pct * 100:.0f}%** vs "
-                f"**{seg.ref_full_throttle_pct * 100:.0f}%** of the segment"
+                f"- Full throttle: {seg.full_throttle_pct * 100:.0f}% vs "
+                f"{seg.ref_full_throttle_pct * 100:.0f}% of the segment"
             )
             lines.append("")
 
@@ -1692,7 +1700,7 @@ async def list_cars(search_term: str = "", show_legacy: bool = False) -> list[Te
                 car_names = [car["name"] for car in sorted_cars[:20]]
 
                 priority_note = " (modern cars prioritized)" if not show_legacy else " (including legacy cars)"
-                response = f"**Cars matching '{search_term}'{priority_note}:**\n\n" + "\n".join(f"• {car}" for car in car_names)
+                response = f"Cars matching '{search_term}'{priority_note}:\n\n" + "\n".join(f"• {car}" for car in car_names)
 
                 if len(sorted_cars) > 20:
                     response += f"\n\n... and {len(sorted_cars) - 20} more cars"
@@ -1703,7 +1711,7 @@ async def list_cars(search_term: str = "", show_legacy: bool = False) -> list[Te
                 # Try fuzzy matching
                 suggestions = cache.get_car_suggestions(search_term, limit=10, include_legacy=show_legacy)
                 if suggestions:
-                    response = f"**No exact matches for '{search_term}'. Did you mean:**\n\n" + "\n".join(f"• {car}" for car in suggestions)
+                    response = f"No exact matches for '{search_term}'. Did you mean:\n\n" + "\n".join(f"• {car}" for car in suggestions)
                 else:
                     response = f"No cars found matching '{search_term}'"
         else:
@@ -1717,7 +1725,7 @@ async def list_cars(search_term: str = "", show_legacy: bool = False) -> list[Te
                 note = " (modern cars only)"
 
             car_names = [car["name"] for car in sorted_cars[:30]]
-            response = f"**Available cars{note}:**\n\n" + "\n".join(f"• {car}" for car in car_names)
+            response = f"Available cars{note}:\n\n" + "\n".join(f"• {car}" for car in car_names)
 
             if len(sorted_cars) > 30:
                 response += f"\n\n... and {len(sorted_cars) - 30} more cars. Use a search term to filter."
@@ -1731,7 +1739,7 @@ async def list_cars(search_term: str = "", show_legacy: bool = False) -> list[Te
 
     except Exception as e:
         logger.error(f"Exception in list_cars: {str(e)}", exc_info=True)
-        return [TextContent(type="text", text=f"Error listing cars: {str(e)}")]
+        return _err(f"listing cars: {e}")
 
 
 async def list_tracks(search_term: str = "") -> list[TextContent]:
@@ -1765,15 +1773,15 @@ async def list_tracks(search_term: str = "") -> list[TextContent]:
                         track_groups[base_name] = []
                     track_groups[base_name].append(track)
 
-                response = f"**Tracks matching '{search_term}':**\n\n"
+                response = f"Tracks matching '{search_term}':\n\n"
 
                 for base_name, variants in track_groups.items():
                     if len(variants) == 1:
                         track = variants[0]
                         full_name = cache._format_track_name_with_variant(track)
-                        response += f"• **{full_name}**\n"
+                        response += f"• {full_name}\n"
                     else:
-                        response += f"**{base_name}:**\n"
+                        response += f"{base_name}:\n"
                         # Sort variants by preference
                         sorted_variants = sorted(
                             variants,
@@ -1783,13 +1791,13 @@ async def list_tracks(search_term: str = "") -> list[TextContent]:
                         for track in sorted_variants:
                             full_name = cache._format_track_name_with_variant(track)
                             preference = cache._get_track_variant_score(track.get("variant", ""))
-                            response += f"  • **{full_name}** (preference: {preference})\n"
+                            response += f"  • {full_name} (preference: {preference})\n"
                     response += "\n"
             else:
                 # Try fuzzy matching
                 suggestions = cache.get_track_suggestions(search_term, limit=10)
                 if suggestions:
-                    response = f"**No exact matches for '{search_term}'. Did you mean:**\n\n" + "\n".join(f"• {track}" for track in suggestions)
+                    response = f"No exact matches for '{search_term}'. Did you mean:\n\n" + "\n".join(f"• {track}" for track in suggestions)
                 else:
                     response = f"No tracks found matching '{search_term}'"
         else:
@@ -1801,7 +1809,7 @@ async def list_tracks(search_term: str = "") -> list[TextContent]:
                     track_groups[base_name] = []
                 track_groups[base_name].append(track)
 
-            response = "**Available tracks:**\n\n"
+            response = "Available tracks:\n\n"
             count = 0
 
             for base_name in sorted(track_groups.keys()):
@@ -1814,9 +1822,9 @@ async def list_tracks(search_term: str = "") -> list[TextContent]:
                 if len(variants) == 1:
                     track = variants[0]
                     full_name = cache._format_track_name_with_variant(track)
-                    response += f"• **{full_name}**\n"
+                    response += f"• {full_name}\n"
                 else:
-                    response += f"**{base_name}** ({len(variants)} variants)\n"
+                    response += f"{base_name} ({len(variants)} variants)\n"
 
                 count += 1
 
@@ -1824,7 +1832,7 @@ async def list_tracks(search_term: str = "") -> list[TextContent]:
 
     except Exception as e:
         logger.error(f"Exception in list_tracks: {str(e)}", exc_info=True)
-        return [TextContent(type="text", text=f"Error listing tracks: {str(e)}")]
+        return _err(f"listing tracks: {e}")
 
 
 # --------------------------------------------------------------------------
@@ -1906,7 +1914,7 @@ LIST_MY_LAPS_TOOL = Tool(
 COMPARE_MY_LAPS_TOOL = Tool(
     name="compare_my_laps",
     description=(
-        "**PRIMARY TOOL FOR TRACKING YOUR OWN PROGRESS** - Compare two of the "
+        "PRIMARY TOOL FOR TRACKING YOUR OWN PROGRESS - Compare two of the "
         "user's OWN laps on the same car and track and show exactly where the time "
         "differs, using a real delta-time calculation from the speed traces. Use "
         "this when the user wants to know how they've improved over time, why a "
