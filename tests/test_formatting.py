@@ -19,7 +19,7 @@ from formatting import (
     kmh,
     uniform_series,
 )
-from tools import _err, _ok, sanitize, strip_markup
+from tools import _err, _ok
 
 SRC = pathlib.Path(__file__).resolve().parents[1] / "src"
 
@@ -98,9 +98,9 @@ class TestLink:
 
 
 class TestTheOutputBoundary:
-    def test_ok_removes_the_bold_markers(self):
-        content = _ok("**Sector 1** was **fast**")
-        assert content[0].text == "Sector 1 was fast"
+    def test_ok_sends_the_message_without_a_change(self):
+        """Nothing corrects the text now. The builders must be correct."""
+        assert _ok("Sector 1 was fast")[0].text == "Sector 1 was fast"
 
     def test_ok_keeps_the_headings(self):
         assert "## Corner 3" in _ok("## Corner 3")[0].text
@@ -133,39 +133,6 @@ def direct_builders(path):
     return found
 
 
-class TestTheChokepoint:
-    """server.call_tool applies the rule to every response.
-
-    A tool that builds its own TextContent cannot send markup. This is the
-    fault that list_cars and list_tracks had, and it was visible only through
-    a client.
-    """
-
-    def test_a_tool_that_skips_the_helper_is_still_corrected(self):
-        from mcp.types import TextContent
-        raw = [TextContent(type="text", text="**Ford Mustang** and **F4**")]
-        assert sanitize(raw)[0].text == "Ford Mustang and F4"
-
-    def test_every_item_is_corrected(self):
-        from mcp.types import TextContent
-        raw = [
-            TextContent(type="text", text="**one**"),
-            TextContent(type="text", text="**two**"),
-        ]
-        assert [c.text for c in sanitize(raw)] == ["one", "two"]
-
-    def test_the_structure_stays(self):
-        text = strip_markup("## Corner 3\n```\n1 2 3\n```\n_km/h_")
-        assert "## Corner 3" in text and "```" in text and "_km/h_" in text
-
-    def test_the_dispatch_result_passes_through_the_rule(self):
-        """The call in server.py must wrap the dispatch, not follow it."""
-        source = (SRC / "server.py").read_text()
-        assert "sanitize(await _dispatch(" in source, (
-            "call_tool no longer applies the boundary rule to the tool output"
-        )
-
-
 class TestNothingSkipsTheBoundary:
     """A second guard, so the fault is visible at the place that causes it."""
 
@@ -187,23 +154,18 @@ class TestNothingSkipsTheBoundary:
                 )
 
     def test_no_builder_writes_a_bold_marker(self):
-        """The output goes to a model. Bold was written and then removed.
+        """This test is the only control on the markup.
 
-        Now no builder writes it. strip_markup stays as the backstop.
+        An earlier version removed the markers at the boundary. That hid the
+        fault: output that carried markup looked correct when you ran the
+        server. Nothing removes them now, thus this test must fail instead.
         """
         for path in sorted(SRC.glob("*.py")):
             tree = ast.parse(path.read_text())
-
-            # strip_markup holds "**" as data, not as output.
-            allowed = set()
-            for node in ast.walk(tree):
-                if isinstance(node, ast.FunctionDef) and node.name == "strip_markup":
-                    allowed.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
-
             for node in ast.walk(tree):
                 if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
                     continue
-                if "**" in node.value and node.lineno not in allowed:
+                if "**" in node.value:
                     pytest.fail(f"{path.name}:{node.lineno} writes a bold marker")
 
     def test_no_source_file_writes_an_emoji(self):

@@ -112,34 +112,19 @@ def _err(message: str) -> list[TextContent]:
     return [TextContent(type="text", text=f"Error: {message}")]
 
 
-def strip_markup(text: str) -> str:
-    """Remove the cosmetic markup from one piece of output.
-
-    The consumer is a model, not a renderer: bold markers are four characters
-    of noise for each emphasis. The structure stays, because it helps the model.
-    These are the ## headings, the code fences, and the _..._ legends.
-
-    No builder writes bold now. This function is the backstop that keeps that
-    true, because a builder cannot send markup by mistake.
-    """
-    return text.replace("**", "")
-
-
-def sanitize(contents: list[TextContent]) -> list[TextContent]:
-    """Apply the boundary rule to every response.
-
-    server.call_tool sends each result through this function. Thus a tool that
-    builds its own TextContent cannot send markup by mistake. list_cars and
-    list_tracks did exactly that, and their bold markers reached the client.
-    """
-    for item in contents:
-        if isinstance(item, TextContent) and item.text:
-            item.text = strip_markup(item.text)
-    return contents
-
-
 def _ok(message: str) -> list[TextContent]:
-    return [TextContent(type="text", text=strip_markup(message))]
+    """Wrap one finished message as a tool response.
+
+    The consumer is a model, not a renderer. No builder writes bold, and no
+    builder writes emoji. The structure stays, because it helps the model:
+    the ## headings, the code fences, and the _..._ legends.
+
+    An earlier version removed the bold markers here. That was a correction
+    after the fact, and it hid the fault: output that carried markup looked
+    correct when you ran the server. The builders are correct now, and a test
+    keeps them correct.
+    """
+    return [TextContent(type="text", text=message)]
 
 
 # --------------------------------------------------------------------------

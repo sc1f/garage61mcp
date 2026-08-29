@@ -253,16 +253,24 @@ A series on a uniform grid (`uniform_series`) gives the spacing one time. It
 does not print a position with each value. The same quantity of characters thus
 gives two times the resolution.
 
-No builder writes bold. Do not add emphasis or emoji again.
+No builder writes bold, and no builder writes emoji. Do not add them again.
 
-The `sanitize()` function is the backstop. The `call_tool` function in
-`server.py` sends every response through it. This is the only point that all
-output goes through. Thus a tool that builds its own `TextContent` cannot send
-markup by mistake. An earlier version relied on each tool to call `_ok()`. The
-`list_cars` and `list_tracks` tools did not call it, and their bold markers
-reached the client. A client showed this fault. The tests did not.
+Nothing removes the markup at run time. Two earlier versions did, and both were
+corrections after the fact:
 
-The tool descriptions do not go through `sanitize()`. Keep them plain.
+- The `_ok()` function removed the markers. But a tool could build its own
+  `TextContent` and never call `_ok()`. The `list_cars` and `list_tracks` tools
+  did exactly that, and their bold markers reached the client. Also, the tool
+  descriptions never went through `_ok()` at all.
+- A `sanitize()` function then removed the markers at `call_tool`, which all
+  output goes through. This closed the hole, but it hid the fault: output that
+  carried markup looked correct when you ran the server.
+
+The control is now `test_no_builder_writes_a_bold_marker`. It reads each string
+in `src/` and it fails if any string contains a bold marker. Thus the fault is
+visible where it starts, and not at the boundary.
+
+This test also covers the tool descriptions, which no boundary can correct.
 
 Three Markdown elements stay, because they help the model. The `##` headings
 give a structure that the model can refer to. The code fences show which
@@ -444,6 +452,7 @@ Two tests protect a fault that returned more than one time:
   on its own integral. A shared track length made a difference of +1.094s from
   an actual difference of +0.265s.
 - `test_no_builder_writes_a_bold_marker` keeps the markup out of the output.
+  This test is the only control. Nothing removes the markers at run time.
 
 GitHub Actions runs the tests on each push to `main` and on each pull request.
 The workflow also makes sure that the `mcp` package stays below version 2.

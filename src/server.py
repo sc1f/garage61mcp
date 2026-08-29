@@ -10,7 +10,6 @@ from mcp.types import TextContent
 from api_client import initialize_cache
 from tools import (
     ALL_TOOLS,
-    sanitize,
     analyze_consistency,
     analyze_corner,
     analyze_telemetry_range,
@@ -157,14 +156,12 @@ def build_server() -> Server:
             # no token exists at process startup.
             from api_client import ensure_cache
             await ensure_cache()
-            # Every response leaves through here, thus the boundary rule
-            # applies even to a tool that builds its own TextContent.
-            return sanitize(await _dispatch(name, arguments or {}))
+            return await _dispatch(name, arguments or {})
         except Exception as e:
             # Surfacing the failure beats raising, which shows the user an
             # opaque transport error with no indication of what went wrong.
             logger.error(f"Error in tool execution: {e}", exc_info=True)
-            return sanitize([TextContent(type="text", text=f"Error: {name} failed: {e}")])
+            return [TextContent(type="text", text=f"Error: {name} failed: {e}")]
 
     return server
 
