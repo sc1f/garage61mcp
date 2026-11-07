@@ -1,0 +1,44 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install the dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run the tests
+        run: pytest -q
+
+      - name: Make sure that the mcp package stays below version 2
+        # Version 2.x removed the decorators that server.py uses. The server
+        # then stops at startup.
+        run: |
+          python - <<'PY'
+          import mcp.server
+          from importlib.metadata import version
+          installed = version("mcp")
+          assert int(installed.split(".")[0]) < 2, f"mcp {installed} is too new"
+          assert hasattr(mcp.server.Server("t"), "list_tools"), "the decorators are absent"
+          print(f"mcp {installed} is correct")
+          PY
